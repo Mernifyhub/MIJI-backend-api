@@ -1,0 +1,820 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+
+
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/////////////////////////
+// USER (AGENT / ADMIN)
+/////////////////////////
+model User {
+  id             String      @id @default(uuid())
+  agentId        String?     @unique
+  firstName      String
+  lastName       String
+  agentName      String
+  agentAddress   String
+  phone          String
+  aviationNumber String
+
+  email          String      @unique
+  password       String
+  refreshToken   String? 
+  
+
+  role           Role        @default(USER)
+
+  nidCopy        String
+  tradeLicense   String
+  logo           String?     @default("")
+
+  city              String?      @default("")
+  country           String?      @default("")
+  status            AgentStatus  @default(PENDING)
+  tier              AgentTier    @default(BRONZE)
+  balance           Float        @default(0)
+  creditLimit       Float        @default(0)
+  expiredLimit      DateTime?
+  usedLimit         Float        @default(0)
+  commission        Float        @default(5.0)
+  verified          Boolean      @default(false)
+  preBookingEnabled Boolean      @default(false)
+  lastActive        DateTime     @default(now())
+
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  // ✅
+  bookings          Booking[]
+  payments          Payment[]
+  deposits          Deposit[]
+  subUsers          SubUser[]
+  agentLedgers      AgentLedger[]
+  notifications Notification[]
+  agentMarkups      Markup[]        @relation("AgentMarkups")
+  createdMarkups    Markup[]        @relation("MarkupCreatedBy")
+  updatedMarkups    Markup[]        @relation("MarkupUpdatedBy")
+  createdRates      CurrencyRate[]  @relation("RateCreatedBy")
+  updatedRates      CurrencyRate[]  @relation("RateUpdatedBy")
+
+   //Assign and release  relations✅
+  requests                BookingRequest[] @relation("AgentBookingRequests")
+  assignedBookingRequests BookingRequest[] @relation("AssignedBookingRequests")
+
+//manural oparaton relations✅
+  manualOperations  ManualOperation[]
+
+  //Discount relations✅
+  agentDiscounts    DiscountRule[]     @relation("AgentDiscounts")
+  createdDiscounts  DiscountRule[]     @relation("DiscountCreatedBy")
+  updatedDiscounts  DiscountRule[]     @relation("DiscountUpdatedBy")
+  discountUsages    DiscountUsageLog[] @relation("AgentDiscountUsage")
+
+  @@index([email])
+  @@index([role])
+  @@index([status])
+  @@index([tier])
+  @@index([country])
+  @@index([agentId])
+}
+
+/////////////////////////
+// SUB-USER (STAFF)
+/////////////////////////
+model SubUser {
+  id        String      @id @default(cuid())
+  username  String      @unique
+  password  String
+  role      SubUserRole @default(OPERATOR)
+  isActive  Boolean     @default(true)
+
+  fullName    String?
+  email       String?
+  phone       String?
+  permissions String[]  @default([])
+
+  agentId   String
+  agent     User        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  lastLogin DateTime?
+
+  depositsCreated     Int @default(0)
+  withdrawalsCreated  Int @default(0)
+
+  @@index([agentId])
+  @@index([username])
+}
+
+/////////////////////////
+// BOOKING (MAIN ENTITY)
+/////////////////////////
+model Booking {
+  id             String         @id @default(cuid())
+  bookingId      String         @unique
+  status         BookingStatus  @default(ON_HOLD)
+
+  tripType       TripType
+  route          String
+  departureDate  DateTime
+  returnDate     DateTime?
+  pnr            String         @unique
+  carrier        String
+  currency       String?        @default("SAR")
+  cabinClass     String?
+  baggageInfo    Json?
+  conditions     Json?
+  issuedBy       String?
+  bookingDate    DateTime       @default(now())
+
+  agentId        String
+  agent          User           @relation(fields: [agentId], references: [id], onDelete: Cascade)
+ 
+
+  passengers     Passenger[]
+  segments       FlightSegment[]
+  payments       Payment[]
+
+  requests       BookingRequest[] @relation("BookingToRequests")
+
+  net            Decimal @db.Decimal(12, 2)
+  gross          Decimal @db.Decimal(12, 2)
+  commission     Decimal @default(0) @db.Decimal(12, 2)
+  priceBreakdown Json?
+
+  // ✅ NEW: Discount snapshot fields
+  promoDiscount  Decimal? @default(0) @db.Decimal(12, 2)
+  discountAmount Decimal? @default(0) @db.Decimal(12, 2)
+  discountLabels    String?    // JSON string ["Eid Offer", "Route Discount"]
+  discountRuleIds   String?    // JSON string ["rule_id_1", "rule_id_2"]
+
+  remarks        String?
+
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  // ✅ NEW: Discount usage logs relation
+  discountUsages DiscountUsageLog[]
+
+  @@index([agentId])
+  @@index([status])
+  @@index([bookingDate])
+  @@index([pnr])
+}
+
+/////////////////////////
+// BOOKING REQUEST
+/////////////////////////
+model BookingRequest {
+  id            String         @id @default(cuid())
+  bookingId     String
+  agentId       String
+
+  type          RequestType
+  status        RequestStatus  @default(PENDING)
+
+  remarks       String?
+  adminNote     String?
+
+  processedBy   String?
+  processedAt   DateTime?
+
+  gdsPnr        String?
+  ticketNumber  String?
+  supplierName  String?
+  issueAmount   Float?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+//Assign and release system✅
+  assignedToId  String?
+  assignedAt    DateTime?
+  booking       Booking        @relation("BookingToRequests", fields: [bookingId], references: [id], onDelete: Cascade)
+  agent         User           @relation("AgentBookingRequests", fields: [agentId], references: [id], onDelete: Cascade)
+  assignedTo    User?          @relation("AssignedBookingRequests", fields: [assignedToId], references: [id], onDelete: SetNull)
+
+  @@index([bookingId])
+  @@index([agentId])
+  @@index([status])
+  @@index([type])
+  @@index([assignedToId])
+}
+
+/////////////////////////
+// PASSENGER
+/////////////////////////
+model Passenger {
+  id             String          @id @default(cuid())
+  bookingId      String
+
+  title          PassengerTitle?
+  firstName      String
+  lastName       String
+  type           PassengerType
+  gender         Gender?
+  dateOfBirth    DateTime?
+
+  email          String?
+  phone          String?
+
+  nationality    String?
+  passportNumber String?
+  passportExpiry DateTime?
+
+  booking        Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  createdAt      DateTime @default(now())
+
+  @@index([bookingId])
+}
+
+/////////////////////////
+// FLIGHT SEGMENT
+/////////////////////////
+model FlightSegment {
+  id         String   @id @default(cuid())
+  bookingId  String
+
+  from       String
+  to         String
+
+  departure  DateTime
+  arrival    DateTime
+
+  flightNo   String
+  airline    String
+
+  booking    Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+}
+
+/////////////////////////
+// PAYMENT
+/////////////////////////
+model Payment {
+  id            String        @id @default(cuid())
+  bookingId     String
+  userId        String
+
+  amount        Float
+  currency      String        @default("SAR")
+
+  method        PaymentMethod
+  status        PaymentStatus @default(PENDING)
+
+  transactionId String?
+  paidAt        DateTime?
+
+  booking       Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  user          User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt     DateTime @default(now())
+
+  @@index([bookingId])
+  @@index([userId])
+  @@index([status])
+}
+
+/////////////////////////
+// AGENT LEDGER
+/////////////////////////
+model AgentLedger {
+  id            String           @id @default(cuid())
+
+  userId        String
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type          LedgerType
+  sourceType    LedgerSourceType
+  sourceId      String?
+
+  debit         Decimal          @default(0) @db.Decimal(12, 2)
+  credit        Decimal          @default(0) @db.Decimal(12, 2)
+  balanceAfter  Decimal          @default(0) @db.Decimal(12, 2)
+  currency      String           @default("SAR")
+
+  invoiceNo     String?          @unique
+  bookingId     String?
+  depositId     String?
+  operationId   String?
+  reference     String?
+  pnr           String?
+  systemPnr     String?
+  flightDate    DateTime?
+
+  description   String
+  status        LedgerStatus     @default(COMPLETED)
+  createdBy     String?
+  note          String?
+
+  createdAt     DateTime         @default(now())
+
+  @@index([userId, createdAt])
+  @@index([userId, type])
+  @@index([userId, sourceType])
+  @@index([invoiceNo])
+  @@index([bookingId])
+  @@index([depositId])
+  @@index([operationId])
+  @@index([pnr])
+}
+
+/////////////////////////
+// DEPOSIT
+/////////////////////////
+model Deposit {
+  id            String        @id @default(cuid())
+  userId        String
+
+  amount        Float
+  currency      String        @default("SAR")
+
+  method        PaymentMethod
+  status        PaymentStatus @default(PENDING)
+
+  transactionId String?
+  reference     String?       @unique
+  notes         String?
+  attachment    String?
+
+  approvedBy    String?
+  approvedAt    DateTime?
+  rejectedAt    DateTime?
+  rejectionNote String?
+
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+/////////////////////////
+// CURRENCY RATE
+/////////////////////////
+model CurrencyRate {
+  id            String    @id @default(cuid())
+
+  fromCurrency  String
+  toCurrency    String
+
+  countryName   String?
+  countryCode   String?
+  flag          String?
+
+  buyRate       Decimal   @db.Decimal(12, 4)
+  sellRate      Decimal   @db.Decimal(12, 4)
+
+  isActive      Boolean   @default(true)
+  priority      Int       @default(0)
+  note          String?
+
+  createdById   String?
+  createdBy     User?     @relation("RateCreatedBy", fields: [createdById], references: [id])
+  updatedById   String?
+  updatedBy     User?     @relation("RateUpdatedBy", fields: [updatedById], references: [id])
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime?
+
+  @@unique([fromCurrency, toCurrency, deletedAt])
+  @@index([fromCurrency, isActive])
+  @@index([toCurrency, isActive])
+  @@map("currency_rates")
+}
+
+/////////////////////////
+// SUBDOMAIN CURRENCY
+/////////////////////////
+model SubdomainCurrency {
+  id            String    @id @default(cuid())
+
+  subdomain     String    @unique
+  countryName   String
+  countryCode   String
+  flag          String
+  currencyCode  String
+  currencyName  String
+
+  rate          Decimal   @db.Decimal(12, 4)
+
+  isActive      Boolean   @default(true)
+  note          String?
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([subdomain, isActive])
+  @@map("subdomain_currencies")
+}
+
+/////////////////////////
+// MANUAL OPERATION
+/////////////////////////
+model ManualOperation {
+  id             String   @id @default(uuid())
+  userId         String
+  type           String
+  amount         Float    @default(0)
+  description    String   @default("")
+  reference      String?
+  pnr            String?
+  passengerName  String?
+  route          String?
+  travelDate     DateTime?
+  newLimit       Float?
+  previousLimit  Float?
+  status         String   @default("COMPLETED")
+  createdBy      String   @default("Admin")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+ user           User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([type])
+  @@index([status])
+  @@index([createdAt])
+}
+
+/////////////////////////
+// MARKUP
+/////////////////////////
+model Markup {
+  id              String         @id @default(cuid())
+
+  type            MarkupType
+
+  airlineCode     String?
+  airlineName     String?
+  origin          String?
+  destination     String?
+  routeMatchType  RouteMatchType @default(EXACT)
+  agentId         String?
+  agent           User?          @relation("AgentMarkups", fields: [agentId], references: [id])
+
+  markupAmount    Decimal        @default(0) @db.Decimal(10, 2)
+  markupPercent   Decimal        @default(0) @db.Decimal(5, 2)
+  markupOn        MarkupOn       @default(BASE_FARE)
+  markupCurrency String    @default("SAR")         // ← NEW: SAR | USD
+
+  ruleKey         String?        @unique
+
+  isActive        Boolean        @default(true)
+  priority        Int            @default(0)
+
+  validFrom       DateTime?
+  validTo         DateTime?
+
+  note            String?
+
+  createdById     String?
+  createdBy       User?          @relation("MarkupCreatedBy", fields: [createdById], references: [id])
+  updatedById     String?
+  updatedBy       User?          @relation("MarkupUpdatedBy", fields: [updatedById], references: [id])
+
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  deletedAt       DateTime?
+
+  @@index([type, isActive])
+  @@index([airlineCode, isActive])
+  @@index([origin, destination, isActive])
+  @@index([agentId, isActive])
+  @@map("markups")
+}
+
+/////////////////////////
+// DISCOUNT RULE ✅ NEW
+/////////////////////////
+model DiscountRule {
+  id               String             @id @default(cuid())
+
+  type             DiscountRuleType
+  name             String
+  description      String?
+
+  discountType     DiscountValueType
+  discountValue    Float
+  discountOn       DiscountApplyOn    @default(TOTAL)
+  maxDiscount      Float?
+  minFare          Float?
+
+  airlineCode      String?
+  origin           String?
+  destination      String?
+  routeMatchType   RouteMatchType     @default(EXACT)
+  cabinClass       String?
+
+  // ✅ Agent relation
+  agentId          String?
+  agent            User?              @relation("AgentDiscounts", fields: [agentId], references: [id], onDelete: SetNull)
+
+  agentTier        AgentTier?
+
+  promoCode        String?            @unique
+
+  validFrom        DateTime?
+  validTo          DateTime?
+
+  maxUsageTotal    Int?
+  maxUsagePerAgent Int?
+  currentUsage     Int                @default(0)
+
+  priority         Int                @default(10)
+  isActive         Boolean            @default(true)
+  isStackable      Boolean            @default(false)
+
+  currency         String             @default("SAR")
+
+  // ✅ Audit relations
+  createdById      String?
+  createdBy        User?              @relation("DiscountCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedById      String?
+  updatedBy        User?              @relation("DiscountUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  deletedAt        DateTime?
+
+  // ✅ Usage logs
+  usageLogs        DiscountUsageLog[]
+
+  @@index([type, isActive])
+  @@index([airlineCode])
+  @@index([origin, destination])
+  @@index([agentId])
+  @@index([promoCode])
+  @@index([validFrom, validTo])
+  @@index([deletedAt])
+  @@map("discount_rules")
+}
+
+/////////////////////////
+// DISCOUNT USAGE LOG ✅ NEW
+/////////////////////////
+model DiscountUsageLog {
+  id             String       @id @default(cuid())
+
+  // ✅ Rule relation
+  discountRuleId String
+  discountRule   DiscountRule @relation(fields: [discountRuleId], references: [id], onDelete: Cascade)
+
+  // ✅ Booking relation
+  bookingId      String?
+  booking        Booking?     @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+
+  // ✅ Agent relation
+  agentId        String?
+  agent          User?        @relation("AgentDiscountUsage", fields: [agentId], references: [id], onDelete: SetNull)
+
+  // ✅ Snapshot of discount at time of use
+  discountType   DiscountValueType
+  discountValue  Float
+  amount         Float             // actual SAR amount deducted
+  currency       String            @default("SAR")
+
+  // ✅ Audit
+  promoCode      String?
+  note           String?
+
+  appliedAt      DateTime          @default(now())
+
+  @@index([discountRuleId])
+  @@index([bookingId])
+  @@index([agentId])
+  @@index([appliedAt])
+  @@map("discount_usage_logs")
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type      String   // "deposit" | "booking" | "alert" | "system" | "approval"
+  title     String
+  message   String
+  action    String?  // redirect URL
+  read      Boolean  @default(false)
+  readAt    DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([userId, read])
+}
+
+model Otp {
+  id        String   @id @default(cuid())
+  email     String
+  code      String
+  type      String   @default("LOGIN")
+  expiresAt DateTime
+  verified  Boolean  @default(false)
+  attempts  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([email, type])
+}
+model TrustedDevice {
+  id        String   @id @default(cuid())
+  userId    String
+  email     String
+  token     String   @unique
+  userAgent String?
+  ip        String?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([email, token])
+  @@index([userId])
+}
+
+/////////////////////////
+// ENUMS
+/////////////////////////
+enum Role {
+  USER
+  MANAGER
+  ADMIN
+}
+
+enum SubUserRole {
+  USER
+  OPERATOR
+  VIEWER
+}
+
+enum AgentStatus {
+  ACTIVE
+  PENDING
+  INACTIVE
+  SUSPENDED
+}
+
+enum AgentTier {
+  BRONZE
+  SILVER
+  GOLD
+  PLATINUM
+}
+
+enum BookingStatus {
+  ON_HOLD
+  CONFIRMED
+  CANCELLED
+  VOIDED
+  REFUNDED
+}
+
+enum TripType {
+  ONE_WAY
+  ROUND_TRIP
+  MULTI_CITY
+}
+
+enum RequestType {
+  ISSUE
+  REISSUE
+  CANCEL
+  VOID
+  REFUND
+}
+
+enum RequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  PROCESSING
+}
+
+enum MarkupType {
+  GLOBAL
+  AIRLINE
+  ROUTE
+  AGENT
+  AIRLINE_AGENT
+  ROUTE_AGENT
+}
+
+enum MarkupOn {
+  BASE_FARE
+  TOTAL
+}
+
+enum RouteMatchType {
+  EXACT
+  BIDIRECTIONAL
+}
+
+enum DiscountRuleType {
+  GLOBAL
+  AIRLINE
+  ROUTE
+  AGENT
+  AIRLINE_AGENT
+  ROUTE_AGENT
+  PROMO
+  CAMPAIGN
+}
+
+enum DiscountValueType {
+  FLAT
+  PERCENT
+}
+
+enum DiscountApplyOn {
+  BASE_FARE
+  TOTAL
+}
+
+enum PassengerType {
+  ADULT
+  CHILD
+  INFANT
+}
+
+enum PassengerTitle {
+  MR
+  MRS
+  MS
+  MISS
+  MSTR
+  INF
+}
+
+enum Gender {
+  MALE
+  FEMALE
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  BANK_TRANSFER
+  MOBILE_BANKING
+  MANUAL
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+enum LedgerType {
+  OPENING_BALANCE
+  TICKET
+  ON_HOLD
+  CANCELLED
+  VOID
+  REFUNDED
+  REISSUE
+  SERVICE
+  DEPOSIT
+  DEPOSIT_PENDING
+  DEPOSIT_FAILED
+  DEPOSIT_REFUNDED
+  REFUND
+  ACM
+  ADM
+  MANUAL_BOOKING
+  DEDUCTION
+  DATE_CHANGE
+  AMOUNT_ADD
+  CREDIT_LIMIT_ADD
+  LIMIT_ADJUST
+}
+
+enum LedgerSourceType {
+  BOOKING
+  DEPOSIT
+  MANUAL_OPERATION
+  SYSTEM
+  ADMIN
+}
+
+enum LedgerStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  CANCELLED
+  REFUNDED
+  VOIDED
+}
