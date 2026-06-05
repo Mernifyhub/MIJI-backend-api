@@ -1,8 +1,6 @@
-// src/main.ts
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { Logger, ValidationPipe } from '@nestjs/common';
-
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { TimeoutInterceptor } from './common/interceptors/timeout.interceptor';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
@@ -11,6 +9,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
   // ── Cookie Parser ──
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const cookieParser = require('cookie-parser');
   app.use(cookieParser());
 
@@ -35,7 +34,7 @@ async function bootstrap() {
   // ── Exception Filter ──
   app.useGlobalFilters(new HttpExceptionFilter());
 
-  // ── CORS (Production + Development) ──
+  // ── CORS ──
   const allowedOrigins = [
     'https://mijitravels.com',
     'https://www.mijitravels.com',
@@ -46,13 +45,13 @@ async function bootstrap() {
 
   app.enableCors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (mobile apps, Postman, etc.)
+      // Allow Postman / mobile apps (no origin)
       if (!origin) return callback(null, true);
 
       if (allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
-        callback(new Error('Not allowed by CORS'));
+        callback(new Error(`CORS blocked: ${origin}`));
       }
     },
     credentials: true,
@@ -64,12 +63,12 @@ async function bootstrap() {
   const port = parseInt(process.env.PORT || '3001', 10);
   await app.listen(port, '0.0.0.0');
 
-  Logger.log(`🚀 Server running on port ${port}`);
-  Logger.log(`📍 API endpoint: /api/v1`);
+  Logger.log(`🚀 Server running on port: ${port}`);
+  Logger.log(`📍 API Base: /api/v1`);
   Logger.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
 }
 
 bootstrap().catch((error) => {
-  Logger.error('❌ Error starting server', error);
+  Logger.error('❌ Failed to start server', error);
   process.exit(1);
 });
