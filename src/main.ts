@@ -29,29 +29,47 @@ async function bootstrap() {
   // ── Interceptors ──
   app.useGlobalInterceptors(
     new LoggingInterceptor(),
-    new TimeoutInterceptor(15000), // 15 second timeout
+    new TimeoutInterceptor(15000),
   );
 
   // ── Exception Filter ──
   app.useGlobalFilters(new HttpExceptionFilter());
 
-  // ── CORS ──
+  // ── CORS (Production + Development) ──
+  const allowedOrigins = [
+    'https://mijitravels.com',
+    'https://www.mijitravels.com',
+    'https://api.mijitravels.com',
+    'http://localhost:3000',
+    'http://localhost:5173',
+  ];
+
   app.enableCors({
-    origin: 'http://localhost:3000',
+    origin: (origin, callback) => {
+      // Allow requests with no origin (mobile apps, Postman, etc.)
+      if (!origin) return callback(null, true);
+
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Cookie'],
   });
 
-  const port = process.env.PORT ?? 3001;
-  await app.listen(port);
+  // ── Start Server ──
+  const port = parseInt(process.env.PORT || '3001', 10);
+  await app.listen(port, '0.0.0.0');
 
-  Logger.log(
-    `🚀 Application running on http://localhost:${port}/api/v1`,
-  );
+  Logger.log(`🚀 Server running on port ${port}`);
+  Logger.log(`📍 API endpoint: /api/v1`);
+  Logger.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
 }
 
 bootstrap().catch((error) => {
-  Logger.error('Error starting server', error);
+  Logger.error('❌ Error starting server', error);
   process.exit(1);
 });
