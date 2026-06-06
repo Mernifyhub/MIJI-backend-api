@@ -34,29 +34,32 @@ async function bootstrap() {
   // ── Exception Filter ──
   app.useGlobalFilters(new HttpExceptionFilter());
 
-  // ── CORS ──
-  const allowedOrigins = [
-    'https://mijitravels.com',
-    'https://www.mijitravels.com',
-    'https://api.mijitravels.com',
-    'http://localhost:3000',
-    'http://localhost:5173',
-  ];
-
+  // ── CORS (Updated for Production) ──
   app.enableCors({
-    origin: (origin, callback) => {
-      // Allow Postman / mobile apps (no origin)
+    origin: function (origin, callback) {
+      // Allow requests with no origin (like Postman or mobile apps)
       if (!origin) return callback(null, true);
 
-      if (allowedOrigins.includes(origin)) {
+      const allowedOrigins = [
+        'https://mijitravels.com',
+        'https://www.mijitravels.com',
+        'https://api.mijitravels.com',
+        'http://localhost:3000',
+        'http://localhost:5173',
+      ];
+
+      // Allow if origin is in the list, OR if it's a netlify preview URL
+      if (allowedOrigins.includes(origin) || origin.endsWith('.netlify.app')) {
         callback(null, true);
       } else {
+        Logger.warn(`🚨 CORS Blocked for origin: ${origin}`, 'CORS');
         callback(new Error(`CORS blocked: ${origin}`));
       }
     },
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Cookie'],
+    // String format works better for Preflight (OPTIONS) requests in Express/Nest
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+    allowedHeaders: 'Content-Type, Accept, Authorization, Cookie, Origin, X-Requested-With',
   });
 
   // ── Start Server ──
