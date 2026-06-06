@@ -7,7 +7,11 @@ import {
   Res,
   Req,
   UseGuards,
+  UseInterceptors,
+  UploadedFiles,
+  BadRequestException,
 } from '@nestjs/common';
+import { FileFieldsInterceptor } from '@nestjs/platform-express';
 import {
   Response as ExpressResponse,
   Request as ExpressRequest,
@@ -15,103 +19,141 @@ import {
 } from 'express';
 
 import { AuthService } from './auth.service';
+import { RegisterUserDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { ResendOtpDto } from './dto/resend-otp.dto';
 import { JwtAuthGuard } from './guard/jwt-auth.guard';
 import { GetUser } from './decorator/get-user.decorator';
 
-type AuthCookiePayload = {
-  token?: string;
-  Role?: string;
-  deviceToken?: string;
-};
+// Service থেকে type নিয়ে আয় - redefine করো না
+type LoginServiceResult = Awaited<ReturnType<AuthService['login']>>;
+type VerifyServiceResult = Awaited<ReturnType<AuthService['verifyLoginOtp']>>;
+
+const COOKIE_NAMES = {
+  TOKEN: 'token',
+  ROLE: 'role',
+  DEVICE_TOKEN: 'deviceToken',
+} as const;
+
+const TOKEN_MAX_AGE = 60 * 60 * 1000;
+const DEVICE_TOKEN_MAX_AGE = 30 * 24 * 60 * 60 * 1000;
 
 @Controller('auth')
 export class AuthController {
+  private readonly isProduction = process.env.NODE_ENV === 'production';
+
   constructor(private readonly authService: AuthService) {}
 
-  // ========================
-  // PRIVATE: type guard
-  // ========================
-  private hasAuthPayload(result: unknown): result is AuthCookiePayload {
-    return !!result && typeof result === 'object';
-  }
-
-  // ========================
-  // PRIVATE: set auth cookies
-  // ========================
-  private setAuthCookies(res: ExpressResponse, result: AuthCookiePayload) {
-    const isProduction = process.env.NODE_ENV === 'production';
-
-    if (result.token) {
-      res.cookie('token', result.token, {
-        httpOnly: true,
-        secure: isProduction,
-        sameSite: isProduction ? 'none' : 'lax',
-        path: '/',
-        maxAge: 60 * 60 * 1000, // 1 hour
-      });
-    }
-
-    if (result.Role) {
-      res.cookie('role', result.Role, {
-        httpOnly: true,
-        secure: isProduction,
-        sameSite: isProduction ? 'none' : 'lax',
-        path: '/',
-        maxAge: 60 * 60 * 1000,
-      });
-    }
-
-    // optional: jodi deviceToken cookie-teo rakhte chao
-    if (result.deviceToken) {
-      res.cookie('deviceToken', result.deviceToken, {
-        httpOnly: true,
-        secure: isProduction,
-        sameSite: isProduction ? 'none' : 'lax',
-        path: '/',
-        maxAge: 12 * 60 * 60 * 1000, // 12 hours
-      });
-    }
-  }
-
-  // ========================
-  // PRIVATE: clear auth cookies
-  // ========================
-  private clearAuthCookies(res: ExpressResponse) {
-    const isProduction = process.env.NODE_ENV === 'production';
-
-    const cookieOptions: CookieOptions = {
+  private get baseCookieOptions(): CookieOptions {
+    return {
       httpOnly: true,
-      secure: isProduction,
-      sameSite: isProduction ? 'none' : 'lax',
+      secure: this.isProduction,
+      sameSite: this.isProduction ? 'none' : 'lax',
       path: '/',
     };
+  }
 
-    res.clearCookie('token', cookieOptions);
-    res.clearCookie('role', cookieOptions);
-    res.clearCookie('deviceToken', cookieOptions);
+  private setAuthCookies(
+    res: ExpressResponse,
+    result: { token: string; Role: string; deviceToken?: string },
+  ): void {
+    const base = this.baseCookieOptions;
+
+    res.cookie(COOKIE_NAMES.TOKEN, result.token, {
+      ...base,
+      maxAge: TOKEN_MAX_AGE,
+    });
+
+    res.cookie(COOKIE_NAMES.ROLE, result.Role, {
+      ...base,
+      httpOnly: false,
+      maxAge: TOKEN_MAX_AGE,
+    });
+
+    if (result.deviceToken) {
+      res.cookie(COOKIE_NAMES.DEVICE_TOKEN, result.deviceToken, {
+        ...base,
+        maxAge: DEVICE_TOKEN_MAX_AGE,
+      });
+    }
+  }
+
+  private clearAuthCookies(res: ExpressResponse): void {
+    const base = this.baseCookieOptions;
+    Object.values(COOKIE_NAMES).forEach((name) => {
+      res.clearCookie(name, base);
+    });
+  }
+
+  private getDeviceTokenFromCookie(req: ExpressRequest): string | undefined {
+    return req.cookies?.[COOKIE_NAMES.DEVICE_TOKEN];
+  }
+
+  // Simple type guard - token আছে কিনা চেক করো
+  private hasToken(result: any): result is { token: string; Role: string; deviceToken?: string } {
+    return result && typeof result === 'object' && typeof result.token === 'string';
   }
 
   // ========================
-  // STEP 1: LOGIN
-  // trusted device hole direct login hote pare
-  // nahole OTP send hobe
+  // REGISTER
+  // ========================
+  @Post('register')
+  @HttpCode(HttpStatus.CREATED)
+  @UseInterceptors(
+    FileFieldsInterceptor([
+      { name: 'nidCopy', maxCount: 1 },
+      { name: 'tradeLicense', maxCount: 1 },
+      { name: 'logo', maxCount: 1 },
+    ]),
+  )
+  async register(
+    @Body() registerDto: RegisterUserDto,
+    @UploadedFiles()
+    files: {
+      nidCopy?: Express.Multer.File[];
+      tradeLicense?: Express.Multer.File[];
+      logo?: Express.Multer.File[];
+    },
+  ) {
+    if (!files?.nidCopy?.[0]) {
+      throw new BadRequestException('NID copy is required');
+    }
+
+    if (!files?.tradeLicense?.[0]) {
+      throw new BadRequestException('Trade license is required');
+    }
+
+    const filePaths = {
+      nidCopy: files.nidCopy[0].path,
+      tradeLicense: files.tradeLicense[0].path,
+      logo: files.logo?.[0]?.path,
+    };
+
+    return this.authService.register(registerDto, filePaths);
+  }
+
+  // ========================
+  // LOGIN
   // ========================
   @Post('login')
   @HttpCode(HttpStatus.OK)
   async login(
     @Body() loginDto: LoginDto,
+    @Req() req: ExpressRequest,
     @Res({ passthrough: true }) res: ExpressResponse,
-  ) {
-    const result = await this.authService.login(loginDto);
+  ): Promise<LoginServiceResult> {
+    const deviceToken = this.getDeviceTokenFromCookie(req);
+    
+    // Fix: Explicitly type করো যাতে undefined accept করে
+    const payload: LoginDto & { deviceToken?: string } = {
+      ...loginDto,
+      ...(deviceToken && { deviceToken }), // শুধু থাকলে যোগ করো
+    };
 
-    // jodi direct login hoy (trusted device), tahole token thakbe
-    if (
-      this.hasAuthPayload(result) &&
-      ('token' in result || 'Role' in result || 'deviceToken' in result)
-    ) {
+    const result = await this.authService.login(payload);
+
+    if (this.hasToken(result)) {
       this.setAuthCookies(res, result);
     }
 
@@ -119,8 +161,7 @@ export class AuthController {
   }
 
   // ========================
-  // STEP 2: VERIFY OTP
-  // OTP verify + token + optional device trust
+  // VERIFY OTP
   // ========================
   @Post('verify-otp')
   @HttpCode(HttpStatus.OK)
@@ -128,13 +169,13 @@ export class AuthController {
     @Body() dto: VerifyOtpDto,
     @Req() req: ExpressRequest,
     @Res({ passthrough: true }) res: ExpressResponse,
-  ) {
-    const userAgent = req.headers['user-agent'] || '';
-    const ip = req.ip || req.socket?.remoteAddress || '';
+  ): Promise<VerifyServiceResult> {
+    const userAgent = req.headers['user-agent'] ?? '';
+    const ip = req.ip ?? req.socket?.remoteAddress ?? '';
 
     const result = await this.authService.verifyLoginOtp(dto, userAgent, ip);
 
-    if (this.hasAuthPayload(result)) {
+    if (this.hasToken(result)) {
       this.setAuthCookies(res, result);
     }
 
@@ -146,7 +187,9 @@ export class AuthController {
   // ========================
   @Post('resend-otp')
   @HttpCode(HttpStatus.OK)
-  async resendOtp(@Body() dto: ResendOtpDto) {
+  async resendOtp(
+    @Body() dto: ResendOtpDto,
+  ): Promise<{ success: boolean; message: string }> {
     return this.authService.resendOtp(dto);
   }
 
@@ -159,14 +202,13 @@ export class AuthController {
   async logout(
     @GetUser('id') userId: string,
     @Res({ passthrough: true }) res: ExpressResponse,
-  ) {
+  ): Promise<{ success: boolean; message: string }> {
     const result = await this.authService.logout(userId);
-
     this.clearAuthCookies(res);
 
     return {
       success: true,
-      message: result?.message || 'Logged out successfully',
+      message: result?.message ?? 'Logged out successfully',
     };
   }
 }

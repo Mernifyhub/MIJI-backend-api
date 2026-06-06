@@ -1,4 +1,13 @@
-import {ConflictException,ForbiddenException,Injectable,InternalServerErrorException,Logger,ServiceUnavailableException,UnauthorizedException,BadRequestException} from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+  ServiceUnavailableException,
+  UnauthorizedException,
+  BadRequestException,
+} from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -16,11 +25,66 @@ import { ResendOtpDto } from './dto/resend-otp.dto';
 import { AuthResponseDto } from './dto/auth-response.dto';
 import { OtpService } from '../otp/otp.service';
 
+// ─────────────────────────────────────────
+// Interfaces
+// ─────────────────────────────────────────
 interface RegisterFilePaths {
   nidCopy: string;
   tradeLicense: string;
   logo?: string;
 }
+
+interface TokenPair {
+  accessToken: string;
+  refreshToken: string;
+}
+
+interface LoginResult {
+  success: boolean;
+  Role: string;
+  type: 'agent' | 'subuser';
+  redirectTo: string;
+  userId: string;
+  userName: string;
+  userEmail: string;
+  token: string;
+  deviceToken?: string;
+}
+
+interface OtpRequiredResult {
+  success: boolean;
+  requireOtp: true;
+  email: string;
+  type: 'agent' | 'subuser';
+  message: string;
+}
+
+// User profile select fields - duplicate avoid করতে
+const USER_PROFILE_SELECT = {
+  id: true,
+  agentId: true,
+  email: true,
+  firstName: true,
+  lastName: true,
+  agentName: true,
+  agentAddress: true,
+  phone: true,
+  aviationNumber: true,
+  role: true,
+  status: true,
+  tier: true,
+  balance: true,
+  creditLimit: true,
+  commission: true,
+  verified: true,
+  logo: true,
+  nidCopy: true,
+  tradeLicense: true,
+  city: true,
+  country: true,
+  createdAt: true,
+  lastActive: true,
+} as const;
 
 @Injectable()
 export class AuthService {
@@ -32,7 +96,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly uploadService: UploadService,
-    private otpService: OtpService,
+    private readonly otpService: OtpService,
   ) {}
 
   // ========================
@@ -57,6 +121,7 @@ export class AuthService {
 
     const normalizedEmail = email.toLowerCase().trim();
 
+    // Check existing user
     const existingUser = await this.prisma.user.findUnique({
       where: { email: normalizedEmail },
     });
@@ -78,14 +143,14 @@ export class AuthService {
           email: normalizedEmail,
           password: hashedPassword,
           agentName: agentName.trim(),
-          agentAddress: agentAddress?.trim() || '',
-          phone: phone?.trim() || '',
-          aviationNumber: aviationNumber?.trim() || '',
+          agentAddress: agentAddress?.trim() ?? '',
+          phone: phone?.trim() ?? '',
+          aviationNumber: aviationNumber?.trim() ?? '',
           nidCopy: filePaths.nidCopy,
           tradeLicense: filePaths.tradeLicense,
-          logo: filePaths.logo || '',
-          city: city?.trim() || '',
-          country: country?.trim() || '',
+          logo: filePaths.logo ?? '',
+          city: city?.trim() ?? '',
+          country: country?.trim() ?? '',
           role: Role.USER,
         },
         select: {
@@ -114,9 +179,7 @@ export class AuthService {
     } catch (error) {
       await this.cleanupFiles(filePaths);
 
-      if (error instanceof ConflictException) {
-        throw error;
-      }
+      if (error?.status) throw error;
 
       this.logger.error(
         'Registration failed',
@@ -128,407 +191,281 @@ export class AuthService {
   }
 
   // ========================
-  // LOGIN
+  // STEP 1: LOGIN
+  // - Credentials verify
+  // - Trusted device → direct login
+  // - Otherwise → send OTP
   // ========================
-// ========================
-// PRIVATE: Generate Token
-// ========================
-private async generateToken(payload: Record<string, any>): Promise<string> {
-  const secret =
-    this.configService.getOrThrow<string>('JWT_ACCESS_SECRET');
-  const expiresIn = this.configService.getOrThrow<string>(
-    'JWT_ACCESS_EXPIRATION',
-  ) as StringValue;
+  async login(
+    loginDto: LoginDto & { deviceToken?: string },
+  ): Promise<LoginResult | OtpRequiredResult> {
+    const { email, password, deviceToken } = loginDto;
 
-  return this.jwtService.signAsync(payload, { secret, expiresIn });
-}
+    if (!email?.trim() || !password?.trim()) {
+      throw new UnauthorizedException(
+        'Email/username and password are required',
+      );
+    }
 
-// ========================
-// PRIVATE: Complete SubUser Login
-// ========================
-private async completeSubUserLogin(subUser: any) {
-  await this.prisma.subUser.update({
-    where: { id: subUser.id },
-    data: { lastLogin: new Date() },
-  });
+    const input = email.toLowerCase().trim();
 
-  const token = await this.generateToken({
-    id: subUser.id,
-    agentId: subUser.agentId,
-    role: String(subUser.role).toUpperCase(),
-    type: 'subuser',
-    permissions: subUser.permissions ?? [],
-  });
-
-  this.logger.log(
-    `SubUser logged in: ${subUser.email || subUser.username}`,
-  );
-
-  return {
-    success: true,
-    Role: String(subUser.role).toUpperCase(),
-    type: 'subuser',
-    redirectTo: '/user/dashboard',
-    userId: subUser.id,
-    userName:
-      subUser.fullName ||
-      subUser.username ||
-      subUser.email ||
-      'Sub User',
-    userEmail: subUser.email || '',
-    token,
-  };
-}
-
-// ========================
-// PRIVATE: Complete Main User Login
-// ========================
-private async completeUserLogin(user: any) {
-  const token = await this.generateToken({
-    id: user.id,
-    role: String(user.role).toUpperCase(),
-    type: 'agent',
-  });
-
-  let redirectTo = '/user/dashboard';
-  if (user.role === Role.ADMIN) redirectTo = '/admin/dashboard';
-  else if (user.role === Role.MANAGER) redirectTo = '/manager/dashboard';
-
-  await this.prisma.user.update({
-    where: { id: user.id },
-    data: { lastActive: new Date() },
-  });
-
-  this.logger.log(`User logged in: ${user.email}`);
-
-  return {
-    success: true,
-    Role: String(user.role).toUpperCase(),
-    type: 'agent',
-    redirectTo,
-    userId: user.id,
-    userName:
-      user.agentName ||
-      `${user.firstName || ''} ${user.lastName || ''}`.trim() ||
-      user.email,
-    userEmail: user.email,
-    token,
-  };
-}
-
-// ========================
-// STEP 1: LOGIN
-// verify credentials
-// if trusted device => direct login
-// otherwise send OTP
-// ========================
-async login(loginDto: LoginDto & { deviceToken?: string }) {
-  const { email, password, deviceToken } = loginDto;
-
-  if (!email || !password) {
-    throw new UnauthorizedException(
-      'Email/username and password are required',
-    );
-  }
-
-  const input = email.toLowerCase().trim();
-
-  try {
-    // ── SUBUSER LOGIN ──
-    const subUser = await this.prisma.subUser.findFirst({
-      where: {
-        OR: [{ username: input }, { email: input }],
-      },
-      include: {
-        agent: {
-          select: { status: true, agentName: true },
+    try {
+      // ── SUBUSER LOGIN ──
+      const subUser = await this.prisma.subUser.findFirst({
+        where: {
+          OR: [{ username: input }, { email: input }],
         },
-      },
-    });
+        include: {
+          agent: {
+            select: { status: true, agentName: true },
+          },
+        },
+      });
 
-    if (subUser) {
-      if (!subUser.isActive) {
-        throw new ForbiddenException(
-          'Your account is deactivated. Contact your agency admin.',
+      if (subUser) {
+        if (!subUser.isActive) {
+          throw new ForbiddenException(
+            'Your account is deactivated. Contact your agency admin.',
+          );
+        }
+
+        this.assertAgentNotSuspended(subUser.agent?.status);
+
+        const isMatch = await bcrypt.compare(password, subUser.password);
+        if (!isMatch) {
+          throw new UnauthorizedException('Invalid credentials');
+        }
+
+        if (!subUser.email) {
+          throw new BadRequestException(
+            'No email linked to this account. Cannot send OTP.',
+          );
+        }
+
+        // Trusted device → skip OTP
+        const isTrusted = await this.otpService.isTrustedDevice(
+          subUser.email,
+          deviceToken,
         );
+
+        if (isTrusted) {
+          return this.completeSubUserLogin(subUser);
+        }
+
+        // OTP send
+        await this.otpService.sendOtp(subUser.email, 'LOGIN');
+
+        return {
+          success: true,
+          requireOtp: true,
+          email: subUser.email,
+          type: 'subuser',
+          message: `OTP sent to ${this.otpService.maskEmail(subUser.email)}`,
+        };
       }
 
-      if (
-        subUser.agent?.status === AgentStatus.SUSPENDED ||
-        subUser.agent?.status === AgentStatus.INACTIVE
-      ) {
-        throw new ForbiddenException('Agency account is suspended.');
+      // ── MAIN USER LOGIN ──
+      const user = await this.prisma.user.findUnique({
+        where: { email: input },
+        select: {
+          id: true,
+          email: true,
+          firstName: true,
+          lastName: true,
+          role: true,
+          status: true,
+          agentId: true,
+          agentName: true,
+          password: true,
+        },
+      });
+
+      if (!user) {
+        throw new UnauthorizedException('Invalid credentials');
       }
 
-      const isMatch = await bcrypt.compare(password, subUser.password);
+      const isMatch = await bcrypt.compare(password, user.password);
       if (!isMatch) {
-        throw new UnauthorizedException('Invalid password');
+        throw new UnauthorizedException('Invalid credentials');
       }
 
-      if (!subUser.email) {
-        throw new BadRequestException(
-          'No email linked to this account. Cannot send OTP.',
-        );
+      if (user.role === Role.USER) {
+        this.assertUserNotSuspended(user.status);
       }
 
-      // ✅ trusted device hole OTP skip
+      // Trusted device → skip OTP
       const isTrusted = await this.otpService.isTrustedDevice(
-        subUser.email,
+        user.email,
         deviceToken,
       );
 
       if (isTrusted) {
-        return this.completeSubUserLogin(subUser);
+        return this.completeUserLogin(user);
       }
 
-      // ✅ trusted na hole OTP pathao
-      await this.otpService.sendOtp(subUser.email, 'LOGIN');
+      // OTP send
+      await this.otpService.sendOtp(user.email, 'LOGIN');
 
       return {
         success: true,
         requireOtp: true,
-        email: subUser.email,
-        type: 'subuser',
-        message: `OTP sent to ${this.otpService.maskEmail(subUser.email)}`,
+        email: user.email,
+        type: 'agent',
+        message: `OTP sent to ${this.otpService.maskEmail(user.email)}`,
       };
+    } catch (error) {
+      if (error?.status) throw error;
+
+      this.logger.error(
+        `Login failed for "${input}": ${error?.message}`,
+        error?.stack,
+      );
+
+      throw new ServiceUnavailableException(
+        'Service temporarily unavailable. Please try again later.',
+      );
     }
-
-    // ── MAIN USER LOGIN ──
-    const user = await this.prisma.user.findUnique({
-      where: { email: input },
-      select: {
-        id: true,
-        email: true,
-        firstName: true,
-        lastName: true,
-        role: true,
-        status: true,
-        agentId: true,
-        agentName: true,
-        password: true,
-      },
-    });
-
-    if (!user) {
-      throw new UnauthorizedException('User not found');
-    }
-
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      throw new UnauthorizedException('Invalid password');
-    }
-
-    if (user.role === Role.USER) {
-      if (
-        user.status === AgentStatus.SUSPENDED ||
-        user.status === AgentStatus.INACTIVE
-      ) {
-        throw new ForbiddenException(
-          'Your account is suspended. Contact admin.',
-        );
-      }
-
-      if (user.status === AgentStatus.PENDING) {
-        throw new ForbiddenException('Your account is pending approval.');
-      }
-    }
-
-    // ✅ trusted device hole OTP skip
-    const isTrusted = await this.otpService.isTrustedDevice(
-      user.email,
-      deviceToken,
-    );
-
-    if (isTrusted) {
-      return this.completeUserLogin(user);
-    }
-
-    // ✅ trusted na hole OTP pathao
-    await this.otpService.sendOtp(user.email, 'LOGIN');
-
-    return {
-      success: true,
-      requireOtp: true,
-      email: user.email,
-      type: 'agent',
-      message: `OTP sent to ${this.otpService.maskEmail(user.email)}`,
-    };
-  } catch (error) {
-    if (error?.status) throw error;
-
-    this.logger.error(
-      `Login failed for "${input}": ${error?.message}`,
-      error?.stack,
-    );
-
-    throw new ServiceUnavailableException(
-      'Service temporarily unavailable. Please try again later.',
-    );
   }
-}
 
-// ========================
-// STEP 2: VERIFY OTP
-// verify otp
-// if rememberDevice=true => create trusted device
-// ========================
-async verifyLoginOtp(
-  dto: VerifyOtpDto & { rememberDevice?: boolean },
-  userAgent?: string,
-  ip?: string,
-) {
-  const input = dto.email.toLowerCase().trim();
-  const { otp, rememberDevice } = dto;
+  // ========================
+  // STEP 2: VERIFY OTP
+  // - OTP verify
+  // - rememberDevice=true → create trusted device
+  // ========================
+  async verifyLoginOtp(
+    dto: VerifyOtpDto & { rememberDevice?: boolean },
+    userAgent?: string,
+    ip?: string,
+  ): Promise<LoginResult> {
+    const input = dto.email.toLowerCase().trim();
+    const { otp, rememberDevice } = dto;
 
-  try {
-    // ✅ first verify OTP
-    await this.otpService.verifyOtp(input, otp, 'LOGIN');
+    try {
+      // OTP verify
+      await this.otpService.verifyOtp(input, otp, 'LOGIN');
 
-    // ── SUBUSER ──
-    const subUser = await this.prisma.subUser.findFirst({
-      where: {
-        OR: [{ username: input }, { email: input }],
-      },
-      include: {
-        agent: {
-          select: { status: true, agentName: true },
+      // ── SUBUSER ──
+      const subUser = await this.prisma.subUser.findFirst({
+        where: {
+          OR: [{ username: input }, { email: input }],
         },
-      },
-    });
+        include: {
+          agent: {
+            select: { status: true, agentName: true },
+          },
+        },
+      });
 
-    if (subUser) {
-      if (!subUser.isActive) {
-        throw new ForbiddenException(
-          'Your account is deactivated. Contact your agency admin.',
-        );
+      if (subUser) {
+        if (!subUser.isActive) {
+          throw new ForbiddenException(
+            'Your account is deactivated. Contact your agency admin.',
+          );
+        }
+
+        this.assertAgentNotSuspended(subUser.agent?.status);
+
+        const result = await this.completeSubUserLogin(subUser);
+
+        if (rememberDevice && subUser.email) {
+          const deviceToken = await this.otpService.createTrustedDevice(
+            subUser.id,
+            subUser.email,
+            userAgent,
+            ip,
+          );
+          return { ...result, deviceToken };
+        }
+
+        return result;
       }
 
-      if (
-        subUser.agent?.status === AgentStatus.SUSPENDED ||
-        subUser.agent?.status === AgentStatus.INACTIVE
-      ) {
-        throw new ForbiddenException('Agency account is suspended.');
+      // ── MAIN USER ──
+      const user = await this.prisma.user.findUnique({
+        where: { email: input },
+        select: {
+          id: true,
+          email: true,
+          firstName: true,
+          lastName: true,
+          role: true,
+          status: true,
+          agentId: true,
+          agentName: true,
+        },
+      });
+
+      if (!user) {
+        throw new UnauthorizedException('User not found');
       }
 
-      const result = await this.completeSubUserLogin(subUser);
+      if (user.role === Role.USER) {
+        this.assertUserNotSuspended(user.status);
+      }
 
-      // ✅ remember device
-      if (rememberDevice && subUser.email) {
+      const result = await this.completeUserLogin(user);
+
+      if (rememberDevice) {
         const deviceToken = await this.otpService.createTrustedDevice(
-          subUser.id,
-          subUser.email,
+          user.id,
+          user.email,
           userAgent,
           ip,
         );
-
-        return {
-          ...result,
-          deviceToken,
-        };
+        return { ...result, deviceToken };
       }
 
       return result;
-    }
+    } catch (error) {
+      if (error?.status) throw error;
 
-    // ── MAIN USER ──
-    const user = await this.prisma.user.findUnique({
-      where: { email: input },
-      select: {
-        id: true,
-        email: true,
-        firstName: true,
-        lastName: true,
-        role: true,
-        status: true,
-        agentId: true,
-        agentName: true,
-      },
-    });
-
-    if (!user) {
-      throw new UnauthorizedException('User not found');
-    }
-
-    if (user.role === Role.USER) {
-      if (
-        user.status === AgentStatus.SUSPENDED ||
-        user.status === AgentStatus.INACTIVE
-      ) {
-        throw new ForbiddenException(
-          'Your account is suspended. Contact admin.',
-        );
-      }
-
-      if (user.status === AgentStatus.PENDING) {
-        throw new ForbiddenException('Your account is pending approval.');
-      }
-    }
-
-    const result = await this.completeUserLogin(user);
-
-    // ✅ remember device
-    if (rememberDevice) {
-      const deviceToken = await this.otpService.createTrustedDevice(
-        user.id,
-        user.email,
-        userAgent,
-        ip,
+      this.logger.error(
+        `OTP verify failed for "${input}": ${error?.message}`,
+        error?.stack,
       );
 
-      return {
-        ...result,
-        deviceToken,
-      };
+      throw new ServiceUnavailableException(
+        'Service temporarily unavailable. Please try again later.',
+      );
     }
-
-    return result;
-  } catch (error) {
-    if (error?.status) throw error;
-
-    this.logger.error(
-      `OTP verify failed for "${input}": ${error?.message}`,
-      error?.stack,
-    );
-
-    throw new ServiceUnavailableException(
-      'Service temporarily unavailable. Please try again later.',
-    );
   }
-}
 
-// ========================
-// RESEND OTP
-// ========================
-async resendOtp(dto: ResendOtpDto) {
-  const input = dto.email.toLowerCase().trim();
+  // ========================
+  // RESEND OTP
+  // ========================
+  async resendOtp(
+    dto: ResendOtpDto,
+  ): Promise<{ success: boolean; message: string }> {
+    const input = dto.email.toLowerCase().trim();
 
-  try {
-    await this.otpService.sendOtp(input, 'LOGIN');
+    try {
+      await this.otpService.sendOtp(input, 'LOGIN');
 
-    return {
-      success: true,
-      message: `OTP resent to ${this.otpService.maskEmail(input)}`,
-    };
-  } catch (error) {
-    if (error?.status) throw error;
+      return {
+        success: true,
+        message: `OTP resent to ${this.otpService.maskEmail(input)}`,
+      };
+    } catch (error) {
+      if (error?.status) throw error;
 
-    this.logger.error(
-      `Resend OTP failed for "${input}": ${error?.message}`,
-      error?.stack,
-    );
+      this.logger.error(
+        `Resend OTP failed for "${input}": ${error?.message}`,
+        error?.stack,
+      );
 
-    throw new ServiceUnavailableException(
-      'Failed to resend OTP. Please try again.',
-    );
+      throw new ServiceUnavailableException(
+        'Failed to resend OTP. Please try again.',
+      );
+    }
   }
-}
+
   // ========================
   // REFRESH TOKENS
   // ========================
   async refreshTokens(
     userId: string,
     refreshToken: string,
-  ): Promise<{ accessToken: string; refreshToken: string }> {
+  ): Promise<TokenPair> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: {
@@ -544,22 +481,10 @@ async resendOtp(dto: ResendOtpDto) {
       throw new ForbiddenException('Access denied');
     }
 
-    if (user.status === AgentStatus.PENDING) {
-      throw new ForbiddenException('Account is pending approval');
-    }
-    if (user.status === AgentStatus.INACTIVE) {
-      throw new ForbiddenException('Account is inactive');
-    }
-    if (user.status === AgentStatus.SUSPENDED) {
-      throw new ForbiddenException('Account is suspended');
-    }
+    this.assertUserNotSuspended(user.status);
 
-    const isRefreshTokenValid = await bcrypt.compare(
-      refreshToken,
-      user.refreshToken,
-    );
-
-    if (!isRefreshTokenValid) {
+    const isValid = await bcrypt.compare(refreshToken, user.refreshToken);
+    if (!isValid) {
       throw new ForbiddenException('Invalid refresh token');
     }
 
@@ -588,41 +513,14 @@ async resendOtp(dto: ResendOtpDto) {
   async getProfile(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: {
-        id: true,
-        agentId: true,
-        email: true,
-        firstName: true,
-        lastName: true,
-        agentName: true,
-        agentAddress: true,
-        phone: true,
-        aviationNumber: true,
-        role: true,
-        status: true,
-        tier: true,
-        balance: true,
-        creditLimit: true,
-        commission: true,
-        verified: true,
-        logo: true,
-        nidCopy: true,
-        tradeLicense: true,
-        city: true,
-        country: true,
-        createdAt: true,
-        lastActive: true,
-      },
+      select: USER_PROFILE_SELECT,
     });
 
     if (!user) {
       throw new UnauthorizedException('User not found');
     }
 
-    return {
-      success: true,
-      user,
-    };
+    return { success: true, user };
   }
 
   // ========================
@@ -639,15 +537,16 @@ async resendOtp(dto: ResendOtpDto) {
       aviationNumber?: string;
     },
   ) {
-    const user = await this.prisma.user.findUnique({
+    const exists = await this.prisma.user.findUnique({
       where: { id: userId },
+      select: { id: true },
     });
 
-    if (!user) {
+    if (!exists) {
       throw new UnauthorizedException('User not found');
     }
 
-    const updatedUser = await this.prisma.user.update({
+    return this.prisma.user.update({
       where: { id: userId },
       data: {
         ...(data.firstName !== undefined && {
@@ -669,34 +568,8 @@ async resendOtp(dto: ResendOtpDto) {
           aviationNumber: data.aviationNumber.trim(),
         }),
       },
-      select: {
-        id: true,
-        agentId: true,
-        email: true,
-        firstName: true,
-        lastName: true,
-        agentName: true,
-        agentAddress: true,
-        phone: true,
-        aviationNumber: true,
-        role: true,
-        status: true,
-        tier: true,
-        balance: true,
-        creditLimit: true,
-        commission: true,
-        verified: true,
-        logo: true,
-        nidCopy: true,
-        tradeLicense: true,
-        city: true,
-        country: true,
-        createdAt: true,
-        lastActive: true,
-      },
+      select: USER_PROFILE_SELECT,
     });
-
-    return updatedUser;
   }
 
   // ========================
@@ -709,20 +582,23 @@ async resendOtp(dto: ResendOtpDto) {
   ): Promise<{ message: string }> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { password: true },
+      select: { id: true, password: true },
     });
 
     if (!user) {
       throw new UnauthorizedException('User not found');
     }
 
-    const isOldPasswordValid = await bcrypt.compare(
-      oldPassword,
-      user.password,
-    );
-
-    if (!isOldPasswordValid) {
+    const isValid = await bcrypt.compare(oldPassword, user.password);
+    if (!isValid) {
       throw new UnauthorizedException('Current password is incorrect');
+    }
+
+    const isSame = await bcrypt.compare(newPassword, user.password);
+    if (isSame) {
+      throw new BadRequestException(
+        'New password must be different from current password',
+      );
     }
 
     const hashedPassword = await bcrypt.hash(newPassword, this.SALT_ROUNDS);
@@ -745,19 +621,14 @@ async resendOtp(dto: ResendOtpDto) {
     userId: string,
     type: 'nidCopy' | 'tradeLicense' | 'logo',
     newPath: string,
-  ) {
+  ): Promise<void> {
     const currentUser = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { nidCopy: true, tradeLicense: true, logo: true },
     });
 
     if (currentUser) {
-      const oldPath =
-        type === 'nidCopy'
-          ? currentUser.nidCopy
-          : type === 'tradeLicense'
-            ? currentUser.tradeLicense
-            : currentUser.logo;
+      const oldPath = currentUser[type];
 
       if (oldPath && !oldPath.startsWith('http') && oldPath.trim() !== '') {
         const oldFullPath = path.join(process.cwd(), oldPath);
@@ -779,13 +650,98 @@ async resendOtp(dto: ResendOtpDto) {
   }
 
   // ========================
-  // PRIVATE HELPERS
+  // PRIVATE: Complete SubUser Login
+  // ========================
+  private async completeSubUserLogin(subUser: any): Promise<LoginResult> {
+    await this.prisma.subUser.update({
+      where: { id: subUser.id },
+      data: { lastLogin: new Date() },
+    });
+
+    const token = await this.generateSingleToken({
+      id: subUser.id,
+      agentId: subUser.agentId,
+      role: String(subUser.role).toUpperCase(),
+      type: 'subuser',
+      permissions: subUser.permissions ?? [],
+    });
+
+    this.logger.log(`SubUser logged in: ${subUser.email || subUser.username}`);
+
+    return {
+      success: true,
+      Role: String(subUser.role).toUpperCase(),
+      type: 'subuser',
+      redirectTo: '/user/dashboard',
+      userId: subUser.id,
+      userName:
+        subUser.fullName || subUser.username || subUser.email || 'Sub User',
+      userEmail: subUser.email ?? '',
+      token,
+    };
+  }
+
+  // ========================
+  // PRIVATE: Complete Main User Login
+  // ========================
+  private async completeUserLogin(user: any): Promise<LoginResult> {
+    const token = await this.generateSingleToken({
+      id: user.id,
+      role: String(user.role).toUpperCase(),
+      type: 'agent',
+    });
+
+    const redirectMap: Partial<Record<Role, string>> = {
+      [Role.ADMIN]: '/admin/dashboard',
+      [Role.MANAGER]: '/manager/dashboard',
+      [Role.USER]: '/user/dashboard',
+    };
+    const redirectTo = redirectMap[user.role as Role] ?? '/user/dashboard';
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { lastActive: new Date() },
+    });
+
+    this.logger.log(`User logged in: ${user.email}`);
+
+    return {
+      success: true,
+      Role: String(user.role).toUpperCase(),
+      type: 'agent',
+      redirectTo,
+      userId: user.id,
+      userName:
+        user.agentName ||
+        `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim() ||
+        user.email,
+      userEmail: user.email,
+      token,
+    };
+  }
+
+  // ========================
+  // PRIVATE: Generate Single Token (login)
+  // ========================
+  private async generateSingleToken(
+    payload: Record<string, any>,
+  ): Promise<string> {
+    const secret = this.configService.getOrThrow<string>('JWT_ACCESS_SECRET');
+    const expiresIn = this.configService.getOrThrow<string>(
+      'JWT_ACCESS_EXPIRATION',
+    ) as StringValue;
+
+    return this.jwtService.signAsync(payload, { secret, expiresIn });
+  }
+
+  // ========================
+  // PRIVATE: Generate Token Pair (register/refresh)
   // ========================
   private async generateTokens(
     userId: string,
     email: string,
     role: Role,
-  ): Promise<{ accessToken: string; refreshToken: string }> {
+  ): Promise<TokenPair> {
     const payload = { sub: userId, email, role };
 
     const accessSecret =
@@ -817,59 +773,75 @@ async resendOtp(dto: ResendOtpDto) {
     return { accessToken, refreshToken };
   }
 
+  // ========================
+  // PRIVATE: Update Refresh Token
+  // ========================
   private async updateRefreshToken(
     userId: string,
     refreshToken: string,
   ): Promise<void> {
-    const hashedRefreshToken = await bcrypt.hash(
-      refreshToken,
-      this.SALT_ROUNDS,
-    );
-
+    const hashed = await bcrypt.hash(refreshToken, this.SALT_ROUNDS);
     await this.prisma.user.update({
       where: { id: userId },
-      data: { refreshToken: hashedRefreshToken },
+      data: { refreshToken: hashed },
     });
   }
 
+  // ========================
+  // PRIVATE: Generate Agent ID
+  // ========================
   private async generateAgentId(): Promise<string> {
-  const users = await this.prisma.user.findMany({
-    where: {
-      role: 'USER',
-      agentId: { not: null },
-    },
-    select: { agentId: true },
-  });
+    const existingUsers = await this.prisma.user.findMany({
+      where: {
+        role: Role.USER,
+        agentId: { not: null },
+      },
+      select: { agentId: true },
+    });
 
-  const existingNumbers = users
-    .map((u) => u.agentId || '')
-    .filter((id) => /^MPA\d+$/.test(id))
-    .map((id) => parseInt(id.replace('MPA', ''), 10))
-    .filter((n) => Number.isFinite(n));
+    const numbers = existingUsers
+      .map((u) => u.agentId ?? '')
+      .filter((id) => /^MPA\d+$/.test(id))
+      .map((id) => parseInt(id.replace('MPA', ''), 10))
+      .filter((n) => Number.isFinite(n));
 
-  const max = existingNumbers.length
-    ? Math.max(...existingNumbers)
-    : 0;
+    const max = numbers.length ? Math.max(...numbers) : 0;
+    return `MPA${String(max + 1).padStart(3, '0')}`;
+  }
 
-  const next = max + 1;
-
-  return `MPA${String(next).padStart(3, '0')}`;
-}
+  // ========================
+  // PRIVATE: Cleanup Files
+  // ========================
   private async cleanupFiles(filePaths: RegisterFilePaths): Promise<void> {
-    const deletePromises: Promise<unknown>[] = [];
+    const paths = [
+      filePaths.nidCopy,
+      filePaths.tradeLicense,
+      filePaths.logo,
+    ].filter(Boolean) as string[];
 
-    if (filePaths.nidCopy) {
-      deletePromises.push(this.uploadService.deleteFile(filePaths.nidCopy));
-    }
-    if (filePaths.tradeLicense) {
-      deletePromises.push(
-        this.uploadService.deleteFile(filePaths.tradeLicense),
-      );
-    }
-    if (filePaths.logo) {
-      deletePromises.push(this.uploadService.deleteFile(filePaths.logo));
-    }
+    await Promise.allSettled(
+      paths.map((p) => this.uploadService.deleteFile(p)),
+    );
+  }
 
-    await Promise.allSettled(deletePromises);
+  // ========================
+  // PRIVATE: Status Assertions
+  // ========================
+  private assertAgentNotSuspended(status?: AgentStatus | null): void {
+    if (status === AgentStatus.SUSPENDED || status === AgentStatus.INACTIVE) {
+      throw new ForbiddenException('Agency account is suspended.');
+    }
+  }
+
+  private assertUserNotSuspended(status: AgentStatus): void {
+    if (status === AgentStatus.PENDING) {
+      throw new ForbiddenException('Your account is pending approval.');
+    }
+    if (status === AgentStatus.INACTIVE) {
+      throw new ForbiddenException('Account is inactive.');
+    }
+    if (status === AgentStatus.SUSPENDED) {
+      throw new ForbiddenException('Your account is suspended. Contact admin.');
+    }
   }
 }
