@@ -12,6 +12,8 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { FileFieldsInterceptor } from '@nestjs/platform-express';
+import { diskStorage } from 'multer';
+import { extname } from 'path';
 import {
   Response as ExpressResponse,
   Request as ExpressRequest,
@@ -26,7 +28,6 @@ import { ResendOtpDto } from './dto/resend-otp.dto';
 import { JwtAuthGuard } from './guard/jwt-auth.guard';
 import { GetUser } from './decorator/get-user.decorator';
 
-// Service থেকে type নিয়ে আয় - redefine করো না
 type LoginServiceResult = Awaited<ReturnType<AuthService['login']>>;
 type VerifyServiceResult = Awaited<ReturnType<AuthService['verifyLoginOtp']>>;
 
@@ -45,6 +46,9 @@ export class AuthController {
 
   constructor(private readonly authService: AuthService) {}
 
+  // ========================
+  // PRIVATE HELPERS
+  // ========================
   private get baseCookieOptions(): CookieOptions {
     return {
       httpOnly: true,
@@ -90,22 +94,48 @@ export class AuthController {
     return req.cookies?.[COOKIE_NAMES.DEVICE_TOKEN];
   }
 
-  // Simple type guard - token আছে কিনা চেক করো
-  private hasToken(result: any): result is { token: string; Role: string; deviceToken?: string } {
+  private hasToken(
+    result: any,
+  ): result is { token: string; Role: string; deviceToken?: string } {
     return result && typeof result === 'object' && typeof result.token === 'string';
   }
 
   // ========================
-  // REGISTER
+  // ✅ REGISTER (NEW)
   // ========================
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
   @UseInterceptors(
-    FileFieldsInterceptor([
-      { name: 'nidCopy', maxCount: 1 },
-      { name: 'tradeLicense', maxCount: 1 },
-      { name: 'logo', maxCount: 1 },
-    ]),
+    FileFieldsInterceptor(
+      [
+        { name: 'nidCopy', maxCount: 1 },
+        { name: 'tradeLicense', maxCount: 1 },
+        { name: 'logo', maxCount: 1 },
+      ],
+      {
+        storage: diskStorage({
+          destination: './uploads',
+          filename: (req, file, cb) => {
+            const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+            cb(null, `${file.fieldname}-${uniqueSuffix}${extname(file.originalname)}`);
+          },
+        }),
+        limits: {
+          fileSize: 5 * 1024 * 1024, // 5MB
+        },
+        fileFilter: (req, file, cb) => {
+          const allowedTypes = /jpeg|jpg|png|pdf/;
+          const ext = allowedTypes.test(extname(file.originalname).toLowerCase());
+          const mime = allowedTypes.test(file.mimetype);
+
+          if (ext && mime) {
+            cb(null, true);
+          } else {
+            cb(new BadRequestException('Only JPG, PNG, PDF files allowed'), false);
+          }
+        },
+      },
+    ),
   )
   async register(
     @Body() registerDto: RegisterUserDto,
@@ -125,9 +155,9 @@ export class AuthController {
     }
 
     const filePaths = {
-      nidCopy: files.nidCopy[0].path,
-      tradeLicense: files.tradeLicense[0].path,
-      logo: files.logo?.[0]?.path,
+      nidCopy: `uploads/${files.nidCopy[0].filename}`,
+      tradeLicense: `uploads/${files.tradeLicense[0].filename}`,
+      logo: files.logo?.[0] ? `uploads/${files.logo[0].filename}` : undefined,
     };
 
     return this.authService.register(registerDto, filePaths);
@@ -144,11 +174,10 @@ export class AuthController {
     @Res({ passthrough: true }) res: ExpressResponse,
   ): Promise<LoginServiceResult> {
     const deviceToken = this.getDeviceTokenFromCookie(req);
-    
-    // Fix: Explicitly type করো যাতে undefined accept করে
+
     const payload: LoginDto & { deviceToken?: string } = {
       ...loginDto,
-      ...(deviceToken && { deviceToken }), // শুধু থাকলে যোগ করো
+      ...(deviceToken && { deviceToken }),
     };
 
     const result = await this.authService.login(payload);
