@@ -4,9 +4,13 @@ import { Logger, ValidationPipe } from '@nestjs/common';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { TimeoutInterceptor } from './common/interceptors/timeout.interceptor';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
+import helmet from 'helmet';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+
+  // ── Helmet (Security Headers) ──
+  app.use(helmet());
 
   // ── Cookie Parser ──
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -34,11 +38,19 @@ async function bootstrap() {
   // ── Exception Filter ──
   app.useGlobalFilters(new HttpExceptionFilter());
 
-  // ── CORS (Updated for Production) ──
+  // ── CORS ──
+  const isProduction = process.env.NODE_ENV === 'production';
+
   app.enableCors({
     origin: function (origin, callback) {
-      // Allow requests with no origin (like Postman or mobile apps)
-      if (!origin) return callback(null, true);
+      // Production এ no-origin block করবে
+      if (!origin) {
+        if (isProduction) {
+          Logger.warn('🚨 CORS Blocked: No Origin in Production', 'CORS');
+          return callback(new Error('CORS blocked: No origin'));
+        }
+        return callback(null, true);
+      }
 
       const allowedOrigins = [
         'https://mijitravels.com',
@@ -48,7 +60,6 @@ async function bootstrap() {
         'http://localhost:5173',
       ];
 
-      // Allow if origin is in the list, OR if it's a netlify preview URL
       if (allowedOrigins.includes(origin) || origin.endsWith('.netlify.app')) {
         callback(null, true);
       } else {
@@ -57,7 +68,6 @@ async function bootstrap() {
       }
     },
     credentials: true,
-    // String format works better for Preflight (OPTIONS) requests in Express/Nest
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     allowedHeaders: 'Content-Type, Accept, Authorization, Cookie, Origin, X-Requested-With',
   });
