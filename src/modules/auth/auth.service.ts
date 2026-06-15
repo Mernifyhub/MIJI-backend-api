@@ -280,14 +280,19 @@ export class AuthService {
         },
       });
 
-      if (!user) {
-        throw new UnauthorizedException('Invalid credentials');
-      }
+     if (!user) {
+       // Timing attack prevent করতে dummy compare
+       await bcrypt.compare(
+         password,
+         '$2b$12$dummyhashfortimingattackprevention123456',
+       );
+       throw new UnauthorizedException('Invalid credentials');
+     }
 
-      const isMatch = await bcrypt.compare(password, user.password);
-      if (!isMatch) {
-        throw new UnauthorizedException('Invalid credentials');
-      }
+     const isMatch = await bcrypt.compare(password, user.password);
+     if (!isMatch) {
+       throw new UnauthorizedException('Invalid credentials');
+     }
 
       if (user.role === Role.USER) {
         this.assertUserNotSuspended(user.status);
@@ -433,32 +438,55 @@ export class AuthService {
   // ========================
   // RESEND OTP
   // ========================
-  async resendOtp(
-    dto: ResendOtpDto,
-  ): Promise<{ success: boolean; message: string }> {
-    const input = dto.email.toLowerCase().trim();
+ async resendOtp(
+  dto: ResendOtpDto,
+): Promise<{ success: boolean; message: string }> {
+  const input = dto.email.toLowerCase().trim();
 
-    try {
-      await this.otpService.sendOtp(input, 'LOGIN');
+  try {
+    // Email exist check — main user
+    const user = await this.prisma.user.findUnique({
+      where: { email: input },
+      select: { id: true, email: true },
+    });
 
+    // Email exist check — subuser
+    const subUser = !user
+      ? await this.prisma.subUser.findFirst({
+          where: { email: input },
+          select: { id: true, email: true },
+        })
+      : null;
+
+    // Email না থাকলেও same response দাও
+    // যাতে attacker বুঝতে না পারে email exist করে কিনা
+    if (!user && !subUser) {
+      this.logger.warn(`Resend OTP attempted for unknown email: ${input}`);
       return {
         success: true,
         message: `OTP resent to ${this.otpService.maskEmail(input)}`,
       };
-    } catch (error) {
-      if (error?.status) throw error;
-
-      this.logger.error(
-        `Resend OTP failed for "${input}": ${error?.message}`,
-        error?.stack,
-      );
-
-      throw new ServiceUnavailableException(
-        'Failed to resend OTP. Please try again.',
-      );
     }
-  }
 
+    await this.otpService.sendOtp(input, 'LOGIN');
+
+    return {
+      success: true,
+      message: `OTP resent to ${this.otpService.maskEmail(input)}`,
+    };
+  } catch (error) {
+    if (error?.status) throw error;
+
+    this.logger.error(
+      `Resend OTP failed for "${input}": ${error?.message}`,
+      error?.stack,
+    );
+
+    throw new ServiceUnavailableException(
+      'Failed to resend OTP. Please try again.',
+    );
+  }
+}
   // ========================
   // REFRESH TOKENS
   // ========================

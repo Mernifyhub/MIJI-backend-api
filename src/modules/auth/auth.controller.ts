@@ -19,6 +19,7 @@ import {
   Request as ExpressRequest,
   CookieOptions,
 } from 'express';
+import { Throttle, SkipThrottle } from '@nestjs/throttler';
 
 import { AuthService } from './auth.service';
 import { RegisterUserDto } from './dto/register.dto';
@@ -39,6 +40,14 @@ const COOKIE_NAMES = {
 
 const TOKEN_MAX_AGE = 60 * 60 * 1000;
 const DEVICE_TOKEN_MAX_AGE = 30 * 24 * 60 * 60 * 1000;
+
+// ── Allowed mime types for file upload ──
+const ALLOWED_MIME_TYPES = [
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'application/pdf',
+];
 
 @Controller('auth')
 export class AuthController {
@@ -97,14 +106,18 @@ export class AuthController {
   private hasToken(
     result: any,
   ): result is { token: string; Role: string; deviceToken?: string } {
-    return result && typeof result === 'object' && typeof result.token === 'string';
+    return (
+      result && typeof result === 'object' && typeof result.token === 'string'
+    );
   }
 
   // ========================
-  // ✅ REGISTER (NEW)
+  // ✅ REGISTER
+  // Rate Limit: 5 requests per 10 minutes
   // ========================
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
+  @Throttle({ default: { ttl: 600000, limit: 5 } })
   @UseInterceptors(
     FileFieldsInterceptor(
       [
@@ -117,21 +130,30 @@ export class AuthController {
           destination: './uploads',
           filename: (req, file, cb) => {
             const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-            cb(null, `${file.fieldname}-${uniqueSuffix}${extname(file.originalname)}`);
+            cb(
+              null,
+              `${file.fieldname}-${uniqueSuffix}${extname(file.originalname).toLowerCase()}`,
+            );
           },
         }),
         limits: {
           fileSize: 5 * 1024 * 1024, // 5MB
         },
         fileFilter: (req, file, cb) => {
-          const allowedTypes = /jpeg|jpg|png|pdf/;
-          const ext = allowedTypes.test(extname(file.originalname).toLowerCase());
-          const mime = allowedTypes.test(file.mimetype);
+          const allowedExt = /jpeg|jpg|png|pdf/;
+          const extOk = allowedExt.test(
+            extname(file.originalname).toLowerCase(),
+          );
+          // Double check: mime type ও check করো
+          const mimeOk = ALLOWED_MIME_TYPES.includes(file.mimetype);
 
-          if (ext && mime) {
+          if (extOk && mimeOk) {
             cb(null, true);
           } else {
-            cb(new BadRequestException('Only JPG, PNG, PDF files allowed'), false);
+            cb(
+              new BadRequestException('Only JPG, PNG, PDF files allowed'),
+              false,
+            );
           }
         },
       },
@@ -165,9 +187,11 @@ export class AuthController {
 
   // ========================
   // LOGIN
+  // Rate Limit: 10 requests per 1 minute
   // ========================
   @Post('login')
   @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { ttl: 60000, limit: 10 } })
   async login(
     @Body() loginDto: LoginDto,
     @Req() req: ExpressRequest,
@@ -191,9 +215,11 @@ export class AuthController {
 
   // ========================
   // VERIFY OTP
+  // Rate Limit: 5 requests per 1 minute
   // ========================
   @Post('verify-otp')
   @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { ttl: 60000, limit: 5 } })
   async verifyOtp(
     @Body() dto: VerifyOtpDto,
     @Req() req: ExpressRequest,
@@ -213,9 +239,11 @@ export class AuthController {
 
   // ========================
   // RESEND OTP
+  // Rate Limit: 3 requests per 5 minutes (সবচেয়ে strict)
   // ========================
   @Post('resend-otp')
   @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { ttl: 300000, limit: 3 } })
   async resendOtp(
     @Body() dto: ResendOtpDto,
   ): Promise<{ success: boolean; message: string }> {
@@ -224,10 +252,12 @@ export class AuthController {
 
   // ========================
   // LOGOUT
+  // Rate Limit: Skip (authenticated route, no need)
   // ========================
   @Post('logout')
   @HttpCode(HttpStatus.OK)
   @UseGuards(JwtAuthGuard)
+  @SkipThrottle()
   async logout(
     @GetUser('id') userId: string,
     @Res({ passthrough: true }) res: ExpressResponse,
