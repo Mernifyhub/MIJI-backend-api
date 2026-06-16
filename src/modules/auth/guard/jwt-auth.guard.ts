@@ -1,24 +1,16 @@
-import {
-  CanActivate,
-  ExecutionContext,
-  Injectable,
-  Logger,
-  UnauthorizedException,
-} from '@nestjs/common';
+import {CanActivate, ExecutionContext, Injectable,Logger,UnauthorizedException,} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as jwt from 'jsonwebtoken';
 
 type JwtUser = {
   id: string;
-  role?: string;  
+  role?: string;
   type?: string;
   agentId?: string;
 };
 
 type RequestWithUser = {
-  headers: {
-    authorization?: string;
-  };
+  headers: { authorization?: string };
   cookies?: Record<string, string>;
   user?: JwtUser;
 };
@@ -30,29 +22,24 @@ export class JwtAuthGuard implements CanActivate {
   constructor(private readonly configService: ConfigService) {}
 
   canActivate(context: ExecutionContext): boolean {
-    const request =
-      context.switchToHttp().getRequest<RequestWithUser>();
+    const request = context.switchToHttp().getRequest<RequestWithUser>();
 
+    // ✅ Cookie CHCEK FIRST THEN Header
+    const cookieToken = request.cookies?.token ?? null;
     const authHeader = request.headers?.authorization;
     const bearerToken =
-      authHeader && authHeader.startsWith('Bearer ')
-        ? authHeader.replace('Bearer ', '')
+      authHeader?.startsWith('Bearer ')
+        ? authHeader.slice(7)
         : null;
 
-    const cookieToken = request.cookies?.token;
-    const token = cookieToken || bearerToken;
+    const token = cookieToken ?? bearerToken;
 
     if (!token) {
       throw new UnauthorizedException('No token provided');
     }
 
-    const secret =
-      this.configService.get<string>('JWT_ACCESS_SECRET');
-
-    if (!secret) {
-      this.logger.error('JWT_ACCESS_SECRET is missing');
-      throw new UnauthorizedException('JWT secret not configured');
-    }
+    // ✅ getOrThrow use for better error handling 
+    const secret = this.configService.getOrThrow<string>('JWT_ACCESS_SECRET');
 
     try {
       const decoded = jwt.verify(token, secret) as JwtUser;
