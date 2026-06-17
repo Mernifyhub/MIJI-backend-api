@@ -15,9 +15,10 @@ import { CurrencyService } from './services/processors/currency.service';
 import { TravelpayoutsService } from './services/providers/travelpayouts.service';
 import { LocationController } from './controllers/location.controller';
 import { LocationService } from './services/location.service';
+import { ApiProvidersModule } from '../api-providers/api-providers.module';
 
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule,ApiProvidersModule,],
   controllers: [
      FlightSearchController,
      LocationController, 

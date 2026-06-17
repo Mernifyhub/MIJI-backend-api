@@ -7,13 +7,13 @@ import { TravelpayoutsService } from './providers/travelpayouts.service';
 import { NormalizerService } from './processors/normalizer.service';
 import { MarkupService } from './processors/markup.service';
 import { DiscountService } from './processors/discount.service';
+import { ApiProvidersService } from 'src/modules/api-providers/api-providers.service';
 import type {
   FlightSearchParams,
   NormalizedFlight,
 } from '../types/flight.types';
 
 // ✅ source field সহ extended type
-// normalizer এ source নাই, এখানে attach করা হয়
 type FlightWithSource = NormalizedFlight & {
   source?: 'duffel' | 'amadeus' | 'travelpayouts';
   _provider?: 'duffel' | 'amadeus' | 'travelpayouts';
@@ -31,6 +31,7 @@ export class FlightSearchService {
     private readonly normalizer: NormalizerService,
     private readonly markupService: MarkupService,
     private readonly discountService: DiscountService,
+    private readonly apiProvidersService: ApiProvidersService, // ✅ inject
   ) {}
 
   // ==================== DEBUG LOGGER ====================
@@ -68,9 +69,6 @@ export class FlightSearchService {
     data: FlightWithSource[];
     meta: Record<string, any>;
   }> {
-    // ✅ FIXED: default provider = 'all'
-    // আগে 'duffel' ছিল, তাই শুধু Duffel hit হচ্ছিল
-    // এখন provider না আসলে সব API call হবে
     const requestedProvider = String(
       params.provider || 'all',
     ).toLowerCase();
@@ -85,6 +83,26 @@ export class FlightSearchService {
       ? requestedProvider
       : 'all';
 
+    // ✅ DB থেকে active providers এক query তে নিয়ে নাও
+    // Cache আছে — প্রতি search এ DB hit হবে না
+    const activeProviderSlugs =
+      await this.apiProvidersService.getActiveProviderSlugs();
+
+    // ✅ Helper function — provider active কিনা check
+    const isProviderActive = (slug: string): boolean =>
+      activeProviderSlugs.includes(slug);
+
+    // disabled providers list — meta তে পাঠাবো
+    const disabledProviders = [
+      'duffel',
+      'amadeus',
+      'travelpayouts',
+    ].filter((p) => !activeProviderSlugs.includes(p));
+
+    this.logger.log(
+      `Active providers: [${activeProviderSlugs.join(', ')}] | Disabled: [${disabledProviders.join(', ')}]`,
+    );
+
     let rawOffers: any[] = [];
     let isFallback = false;
 
@@ -96,96 +114,115 @@ export class FlightSearchService {
 
     // ────────── DUFFEL ──────────
     if (provider === 'duffel' || provider === 'all') {
-      try {
-        const result = await this.duffel.search(params);
-
-        this.logger.log(
-          `DUFFEL => ok=${result?.ok} offers=${result?.offers?.length || 0}`,
+      // ✅ admin থেকে OFF করা থাকলে skip
+      if (!isProviderActive('duffel')) {
+        this.logger.warn(
+          `DUFFEL is disabled by admin. Skipping.`,
         );
+      } else {
+        try {
+          const result = await this.duffel.search(params);
 
-        // ✅ sample log — first offer দেখে বুঝবা data ঠিক আসছে কিনা
-        if (result?.offers?.length > 0) {
           this.logger.log(
-            `DUFFEL SAMPLE => ${JSON.stringify(result.offers[0]).slice(0, 300)}...`,
+            `DUFFEL => ok=${result?.ok} offers=${result?.offers?.length || 0}`,
           );
-        }
 
-        if (result?.ok && Array.isArray(result.offers)) {
-          rawOffers.push(
-            ...result.offers.map((o) => ({
-              ...o,
-              _provider: 'duffel',
-            })),
+          if (result?.offers?.length > 0) {
+            this.logger.log(
+              `DUFFEL SAMPLE => ${JSON.stringify(result.offers[0]).slice(0, 300)}...`,
+            );
+          }
+
+          if (result?.ok && Array.isArray(result.offers)) {
+            rawOffers.push(
+              ...result.offers.map((o) => ({
+                ...o,
+                _provider: 'duffel',
+              })),
+            );
+          }
+        } catch (error: any) {
+          this.logger.error(
+            `DUFFEL FAILED => ${error?.message || error}`,
+            error?.stack,
           );
         }
-      } catch (error: any) {
-        this.logger.error(
-          `DUFFEL FAILED => ${error?.message || error}`,
-          error?.stack,
-        );
       }
     }
 
     // ────────── AMADEUS ──────────
     if (provider === 'amadeus' || provider === 'all') {
-      try {
-        const result = await this.amadeus.search(params);
-
-        this.logger.log(
-          `AMADEUS => ok=${result?.ok} offers=${result?.offers?.length || 0}`,
+      // ✅ admin থেকে OFF করা থাকলে skip
+      if (!isProviderActive('amadeus')) {
+        this.logger.warn(
+          `AMADEUS is disabled by admin. Skipping.`,
         );
+      } else {
+        try {
+          const result = await this.amadeus.search(params);
 
-        if (result?.offers?.length > 0) {
           this.logger.log(
-            `AMADEUS SAMPLE => ${JSON.stringify(result.offers[0]).slice(0, 300)}...`,
+            `AMADEUS => ok=${result?.ok} offers=${result?.offers?.length || 0}`,
           );
-        }
 
-        if (result?.ok && Array.isArray(result.offers)) {
-          rawOffers.push(
-            ...result.offers.map((o) => ({
-              ...o,
-              _provider: 'amadeus',
-            })),
+          if (result?.offers?.length > 0) {
+            this.logger.log(
+              `AMADEUS SAMPLE => ${JSON.stringify(result.offers[0]).slice(0, 300)}...`,
+            );
+          }
+
+          if (result?.ok && Array.isArray(result.offers)) {
+            rawOffers.push(
+              ...result.offers.map((o) => ({
+                ...o,
+                _provider: 'amadeus',
+              })),
+            );
+          }
+        } catch (error: any) {
+          this.logger.error(
+            `AMADEUS FAILED => ${error?.message || error}`,
+            error?.stack,
           );
         }
-      } catch (error: any) {
-        this.logger.error(
-          `AMADEUS FAILED => ${error?.message || error}`,
-          error?.stack,
-        );
       }
     }
 
     // ────────── TRAVELPAYOUTS ──────────
-    // ✅ এই block এ log দেখে বুঝবা travelpayouts থেকে data আসছে কিনা
     if (provider === 'travelpayouts' || provider === 'all') {
-      try {
-        const result = await this.travelpayouts.search(params);
-
-        this.logger.log(
-          `TRAVELPAYOUTS => ok=${result?.ok} offers=${result?.offers?.length || 0}`,
+      // ✅ admin থেকে OFF করা থাকলে skip
+      if (!isProviderActive('travelpayouts')) {
+        this.logger.warn(
+          `TRAVELPAYOUTS is disabled by admin. Skipping.`,
         );
+      } else {
+        try {
+          const result = await this.travelpayouts.search(params);
 
-        if (result?.offers?.length > 0) {
           this.logger.log(
-            `TRAVELPAYOUTS SAMPLE => ${JSON.stringify(result.offers[0]).slice(0, 300)}...`,
+            `TRAVELPAYOUTS => ok=${result?.ok} offers=${result?.offers?.length || 0}`,
           );
-        }
 
-        if (result?.ok && Array.isArray(result.offers)) {
-          rawOffers.push(
-            ...result.offers.map((o) => ({
-              ...o,
-              _provider: 'travelpayouts',
-            })),
+          if (result?.offers?.length > 0) {
+            this.logger.log(
+              `TRAVELPAYOUTS SAMPLE => ${JSON.stringify(result.offers[0]).slice(0, 300)}...`,
+            );
+          }
+
+          if (result?.ok && Array.isArray(result.offers)) {
+            rawOffers.push(
+              ...result.offers.map((o) => ({
+                ...o,
+                _provider: 'travelpayouts',
+              })),
+            );
+          }
+        } catch (error: any) {
+          this.logger.error(
+            `TRAVELPAYOUTS FAILED => ${error?.message || error}`,
+            error?.stack,
           );
         }
-      } catch (error: any) {
-        this.logger.error(
-          `TRAVELPAYOUTS FAILED => ${error?.message || error}`,
-          error?.stack,
-        );
       }
     }
 
@@ -227,7 +264,6 @@ export class FlightSearchService {
     });
 
     // ==================== 2. NORMALIZE ====================
-    // ✅ source attach হচ্ছে এখানে (normalizer এ source নাই)
     let flights: FlightWithSource[] = rawOffers.map((offer) => {
       // Amadeus
       if (offer._provider === 'amadeus') {
@@ -280,7 +316,7 @@ export class FlightSearchService {
     });
 
     // ==================== 3. FALLBACK IF EMPTY ====================
-   
+
     // ==================== 4. CONVERT TO SAR ====================
     const sourcesBeforeSAR = flights.map((f) => ({
       id: f.id,
@@ -292,7 +328,7 @@ export class FlightSearchService {
       this.markupService.convertFlightToSAR(f),
     ) as FlightWithSource[];
 
-    // ✅ source/provider preserve (convertFlightToSAR may lose them)
+    // ✅ source/provider preserve
     flights = flights.map((f, i) => ({
       ...f,
       source: sourcesBeforeSAR[i]?.source || f?.source,
@@ -317,7 +353,6 @@ export class FlightSearchService {
 
         if (markupRules.length > 0) {
           flights = flights.map((flight) => {
-            // save source before markup
             const savedSource = flight.source;
             const savedProvider = flight._provider;
 
@@ -377,7 +412,6 @@ export class FlightSearchService {
             const updated: FlightWithSource = {
               ...flight,
               discountInfo,
-              // ✅ preserve source
               source: flight.source,
               _provider: flight._provider,
             };
@@ -429,10 +463,11 @@ export class FlightSearchService {
         source: provider,
         currency: 'SAR',
         isFallback,
-
-        // ✅ frontend/postman/network tab এ দেখলে বুঝবা
-        // কোন API থেকে কতটা flight এসেছে
         providerSummary: finalProviderSummary,
+
+        // ✅ নতুন — কোন provider active/disabled সেটা frontend জানবে
+        activeProviders: activeProviderSlugs,
+        disabledProviders: disabledProviders,
 
         request: {
           tripType: params.tripType,
