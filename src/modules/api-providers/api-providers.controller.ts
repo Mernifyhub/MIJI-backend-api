@@ -6,21 +6,24 @@ import {
   Body,
   UseGuards,
 } from '@nestjs/common';
+import { IsBoolean, IsNotEmpty } from 'class-validator';
 import { ApiProvidersService } from './api-providers.service';
 import { JwtAuthGuard } from 'src/modules/auth/guard/jwt-auth.guard';
 import { AdminRoleGuard } from 'src/modules/admin/guards/admin-role.guard';
 
-class ToggleDto {
+// ✅ Proper DTO with class-validator decorators
+class ToggleApiProviderDto {
+  @IsBoolean()
+  @IsNotEmpty()
   isActive: boolean;
 }
 
 @Controller('admin/api-providers')
-@UseGuards(JwtAuthGuard, AdminRoleGuard) // ✅ same guard pattern তোমার existing system এর মতো
+@UseGuards(JwtAuthGuard, AdminRoleGuard)
 export class ApiProvidersController {
   constructor(private readonly service: ApiProvidersService) {}
 
   // GET /api/v1/admin/api-providers
-  // সব provider এর list + status
   @Get()
   async findAll() {
     const providers = await this.service.findAll();
@@ -31,11 +34,10 @@ export class ApiProvidersController {
   }
 
   // PATCH /api/v1/admin/api-providers/:slug/toggle
-  // isActive: true/false
   @Patch(':slug/toggle')
   async toggle(
     @Param('slug') slug: string,
-    @Body() body: ToggleDto,
+    @Body() body: ToggleApiProviderDto, // ✅ proper DTO
   ) {
     const updated = await this.service.toggle(slug, body.isActive);
     return {
