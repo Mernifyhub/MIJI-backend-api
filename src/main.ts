@@ -5,29 +5,32 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { TimeoutInterceptor } from './common/interceptors/timeout.interceptor';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import helmet from 'helmet';
-import { NestExpressApplication } from '@nestjs/platform-express'; // ✅ যোগ করুন
-import { join } from 'path'; // ✅ যোগ করুন
+import { NestExpressApplication } from '@nestjs/platform-express';
+import * as path from 'path';
 
 async function bootstrap() {
-  // ✅ NestExpressApplication type দিন
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
-  // ── Helmet (Security Headers) ──
+  // ── Helmet ──
   app.use(helmet());
 
   // ── Cookie Parser ──
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const cookieParser = require('cookie-parser');
   app.use(cookieParser());
 
-  // ✅ Static File Serve - এটা যোগ করুন
-  app.useStaticAssets(join(__dirname, '..', 'uploads'), {
+  // ✅ Static File Serve
+  // process.cwd() = /home/miji/MIJI-backend-api (সবসময় project root)
+  const uploadsPath = path.resolve(process.cwd(), 'uploads');
+  app.useStaticAssets(uploadsPath, {
     prefix: '/uploads',
   });
+  Logger.log(`📁 Uploads path: ${uploadsPath}`);
 
   // ── Global Prefix ──
   app.setGlobalPrefix('api/v1');
 
-  // বাকি সব আগের মতোই থাকবে...
+  // ── Validation ──
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -36,11 +39,13 @@ async function bootstrap() {
     }),
   );
 
+  // ── Interceptors ──
   app.useGlobalInterceptors(
     new LoggingInterceptor(),
     new TimeoutInterceptor(15000),
   );
 
+  // ── Exception Filter ──
   app.useGlobalFilters(new HttpExceptionFilter());
 
   // ── CORS ──
@@ -74,7 +79,8 @@ async function bootstrap() {
     },
     credentials: true,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
-    allowedHeaders: 'Content-Type, Accept, Authorization, Cookie, Origin, X-Requested-With',
+    allowedHeaders:
+      'Content-Type, Accept, Authorization, Cookie, Origin, X-Requested-With',
   });
 
   // ── Start Server ──
