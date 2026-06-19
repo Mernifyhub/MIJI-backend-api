@@ -5,22 +5,29 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { TimeoutInterceptor } from './common/interceptors/timeout.interceptor';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import helmet from 'helmet';
+import { NestExpressApplication } from '@nestjs/platform-express'; // ✅ যোগ করুন
+import { join } from 'path'; // ✅ যোগ করুন
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // ✅ NestExpressApplication type দিন
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
   // ── Helmet (Security Headers) ──
   app.use(helmet());
 
   // ── Cookie Parser ──
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const cookieParser = require('cookie-parser');
   app.use(cookieParser());
+
+  // ✅ Static File Serve - এটা যোগ করুন
+  app.useStaticAssets(join(__dirname, '..', 'uploads'), {
+    prefix: '/uploads',
+  });
 
   // ── Global Prefix ──
   app.setGlobalPrefix('api/v1');
 
-  // ── Validation ──
+  // বাকি সব আগের মতোই থাকবে...
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -29,13 +36,11 @@ async function bootstrap() {
     }),
   );
 
-  // ── Interceptors ──
   app.useGlobalInterceptors(
     new LoggingInterceptor(),
     new TimeoutInterceptor(15000),
   );
 
-  // ── Exception Filter ──
   app.useGlobalFilters(new HttpExceptionFilter());
 
   // ── CORS ──
@@ -43,7 +48,6 @@ async function bootstrap() {
 
   app.enableCors({
     origin: function (origin, callback) {
-      // Production এ no-origin block করবে
       if (!origin) {
         if (isProduction) {
           Logger.warn('🚨 CORS Blocked: No Origin in Production', 'CORS');
@@ -57,6 +61,7 @@ async function bootstrap() {
         'https://www.mijitravels.com',
         'https://api.mijitravels.com',
         'http://localhost:3000',
+        'http://localhost:3001',
         'http://localhost:5173',
       ];
 
