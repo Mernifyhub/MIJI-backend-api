@@ -5,27 +5,17 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { TimeoutInterceptor } from './common/interceptors/timeout.interceptor';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import helmet from 'helmet';
-import { NestExpressApplication } from '@nestjs/platform-express';
-import * as path from 'path';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const app = await NestFactory.create(AppModule);
 
-  // ── Helmet ──
+  // ── Helmet (Security Headers) ──
   app.use(helmet());
 
   // ── Cookie Parser ──
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const cookieParser = require('cookie-parser');
   app.use(cookieParser());
-
-  // ✅ Static File Serve
-  // process.cwd() = /home/miji/MIJI-backend-api (সবসময় project root)
-  const uploadsPath = path.join(__dirname, '..', 'uploads');
-  app.useStaticAssets(uploadsPath, {
-    prefix: '/uploads',
-  });
-  Logger.log(`📁 Uploads path: ${uploadsPath}`);
 
   // ── Global Prefix ──
   app.setGlobalPrefix('api/v1');
@@ -53,6 +43,7 @@ async function bootstrap() {
 
   app.enableCors({
     origin: function (origin, callback) {
+      // Production এ no-origin block করবে
       if (!origin) {
         if (isProduction) {
           Logger.warn('🚨 CORS Blocked: No Origin in Production', 'CORS');
@@ -66,7 +57,6 @@ async function bootstrap() {
         'https://www.mijitravels.com',
         'https://api.mijitravels.com',
         'http://localhost:3000',
-        'http://localhost:3001',
         'http://localhost:5173',
       ];
 
@@ -79,8 +69,7 @@ async function bootstrap() {
     },
     credentials: true,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
-    allowedHeaders:
-      'Content-Type, Accept, Authorization, Cookie, Origin, X-Requested-With',
+    allowedHeaders: 'Content-Type, Accept, Authorization, Cookie, Origin, X-Requested-With',
   });
 
   // ── Start Server ──
