@@ -21,7 +21,7 @@ async function bootstrap() {
 
   // ✅ Static File Serve
   // process.cwd() = /home/miji/MIJI-backend-api (সবসময় project root)
-  const uploadsPath = path.resolve(process.cwd(), 'uploads');
+  const uploadsPath = path.join(__dirname, '..', 'uploads');
   app.useStaticAssets(uploadsPath, {
     prefix: '/uploads',
   });
