@@ -3,8 +3,6 @@
   "collection": "@nestjs/schematics",
   "sourceRoot": "src",
   "compilerOptions": {
-    "deleteOutDir": false,
-    "builder": "tsc",
-    "tsConfigPath": "tsconfig.build.json"
+    "deleteOutDir": false
   }
 }
