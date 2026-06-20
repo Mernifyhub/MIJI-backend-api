@@ -57,6 +57,7 @@ async function bootstrap() {
         'https://www.mijitravels.com',
         'https://api.mijitravels.com',
         'http://localhost:3000',
+        'http://localhost:3001',
         'http://localhost:5173',
       ];
 
