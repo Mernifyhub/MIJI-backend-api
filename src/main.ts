@@ -1,13 +1,20 @@
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { TimeoutInterceptor } from './common/interceptors/timeout.interceptor';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import helmet from 'helmet';
+import { join } from 'path';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+
+  // ── Static Files (Uploads) ──
+  app.useStaticAssets(join(__dirname, '..', 'uploads'), {
+    prefix: '/uploads',
+  });
 
   // ── Helmet (Security Headers) ──
   app.use(helmet());
@@ -43,7 +50,6 @@ async function bootstrap() {
 
   app.enableCors({
     origin: function (origin, callback) {
-      // Production এ no-origin block করবে
       if (!origin) {
         if (isProduction) {
           Logger.warn('🚨 CORS Blocked: No Origin in Production', 'CORS');
@@ -70,7 +76,8 @@ async function bootstrap() {
     },
     credentials: true,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
-    allowedHeaders: 'Content-Type, Accept, Authorization, Cookie, Origin, X-Requested-With',
+    allowedHeaders:
+      'Content-Type, Accept, Authorization, Cookie, Origin, X-Requested-With',
   });
 
   // ── Start Server ──
@@ -79,6 +86,7 @@ async function bootstrap() {
 
   Logger.log(`🚀 Server running on port: ${port}`);
   Logger.log(`📍 API Base: /api/v1`);
+  Logger.log(`📁 Static Files: /uploads`);
   Logger.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
 }
 

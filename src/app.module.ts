@@ -21,15 +21,15 @@ import { ApiProvidersModule } from './modules/api-providers/api-providers.module
       envFilePath: '.env',
     }),
 
-    // ✅ Upload folder - Direct access restricted
+    // ✅ Uploads folder serve with CORS headers
     ServeStaticModule.forRoot({
-      rootPath: join(__dirname, '..', 'uploads'),
+      rootPath: join(process.cwd(), 'uploads'),
       serveRoot: '/uploads',
       serveStaticOptions: {
-        index: false,
-        fallthrough: false,
-        dotfiles: 'deny',
-        redirect: false,
+        setHeaders: (res) => {
+          res.set('Access-Control-Allow-Origin', '*');
+          res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+        },
       },
     }),
 

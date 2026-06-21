@@ -43,7 +43,13 @@ export class AgentProfileService {
       throw new NotFoundException('User not found');
     }
 
-    return user;
+    // ✅ Path normalize করে return (Windows backslash → forward slash)
+    return {
+      ...user,
+      logo: this.normalizePath(user.logo),
+      nidCopy: this.normalizePath(user.nidCopy),
+      tradeLicense: this.normalizePath(user.tradeLicense),
+    };
   }
 
   async updateProfile(userId: string, dto: UpdateProfileDto) {
@@ -91,7 +97,12 @@ export class AgentProfileService {
       },
     });
 
-    return updatedUser;
+    return {
+      ...updatedUser,
+      logo: this.normalizePath(updatedUser.logo),
+      nidCopy: this.normalizePath(updatedUser.nidCopy),
+      tradeLicense: this.normalizePath(updatedUser.tradeLicense),
+    };
   }
 
   async changePassword(userId: string, dto: ChangePasswordDto) {
@@ -146,30 +157,53 @@ export class AgentProfileService {
             ? currentUser.tradeLicense
             : currentUser.logo;
 
-      if (oldPath && oldPath.startsWith('/uploads/')) {
-        const oldFullPath = path.join(
-          process.cwd(),
-          'public',
-          oldPath,
-        );
-
-        try {
-          if (fs.existsSync(oldFullPath)) {
-            fs.unlinkSync(oldFullPath);
-            this.logger.log(`Deleted old file: ${oldFullPath}`);
+      // ✅ পুরনো file delete করো
+      if (oldPath) {
+        const cleaned = oldPath.replace(/\\/g, '/');
+        const match = cleaned.match(/\/?uploads\/.+$/);
+        if (match) {
+          const oldFullPath = path.join(process.cwd(), match[0]);
+          try {
+            if (fs.existsSync(oldFullPath)) {
+              fs.unlinkSync(oldFullPath);
+              this.logger.log(`Deleted old file: ${oldFullPath}`);
+            }
+          } catch {
+            this.logger.warn(`Failed to delete old file: ${oldFullPath}`);
           }
-        } catch {
-          this.logger.warn(`Failed to delete old file: ${oldFullPath}`);
         }
       }
     }
 
+    // ✅ Path normalize করে DB তে save
+    const normalizedPath = newPath.replace(/\\/g, '/');
+
     await this.prisma.user.update({
       where: { id: userId },
       data: {
-        [type]: newPath,
+        [type]: normalizedPath,
         updatedAt: new Date(),
       },
     });
+
+    this.logger.log(`Updated ${type} for user ${userId}: ${normalizedPath}`);
+  }
+
+  // ✅ Helper: Path normalize
+  private normalizePath(filePath: string | null): string | null {
+    if (!filePath) return null;
+    
+    let normalized = filePath.replace(/\\/g, '/');
+    
+    // Windows drive letter remove
+    normalized = normalized.replace(/^[A-Za-z]:\//, '');
+    
+    // uploads/ থেকে শুরু না হলে fix করো
+    const uploadsIdx = normalized.indexOf('uploads/');
+    if (uploadsIdx !== -1) {
+      normalized = '/' + normalized.slice(uploadsIdx);
+    }
+    
+    return normalized;
   }
 }

@@ -5,14 +5,17 @@ import {
   Put,
   Post,
   Body,
+  Param,
   UseGuards,
   UseInterceptors,
   UploadedFile,
   BadRequestException,
+  Logger,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
+import * as fs from 'fs';
 import { JwtAuthGuard } from 'src/modules/auth/guard/jwt-auth.guard';
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
 import { CurrentUserType } from 'src/common/types/current-user.type';
@@ -20,9 +23,18 @@ import { AgentProfileService } from '../services/agent-profile.service';
 import { UpdateProfileDto } from '../dto/update-profile.dto';
 import { ChangePasswordDto } from '../dto/change-password.dto';
 
+// ✅ Folder map - type অনুযায়ী folder
+const FOLDER_MAP: Record<string, string> = {
+  logo: 'logo',
+  nidCopy: 'nid',
+  tradeLicense: 'trade-license',
+};
+
 @Controller()
 @UseGuards(JwtAuthGuard)
 export class AgentProfileController {
+  private readonly logger = new Logger(AgentProfileController.name);
+
   constructor(
     private readonly agentProfileService: AgentProfileService,
   ) {}
@@ -72,29 +84,38 @@ export class AgentProfileController {
     };
   }
 
-  // ── POST /api/v1/auth/profile/upload-document ──
-  @Post('auth/profile/upload-document')
+  // ── POST /api/v1/auth/profile/upload-document/:type ──
+  // type URL param এ আসবে → multer destination এ instantly available
+  @Post('auth/profile/upload-document/:type')
   @UseInterceptors(
     FileInterceptor('file', {
       storage: diskStorage({
-        destination: './public/uploads',
+        destination: (req, file, cb) => {
+          const type = (req.params?.type as string) || 'misc';
+          const subFolder = FOLDER_MAP[type] || 'misc';
+          const fullPath = `./uploads/${subFolder}`;
+
+          // ✅ Folder না থাকলে বানাও
+          if (!fs.existsSync(fullPath)) {
+            fs.mkdirSync(fullPath, { recursive: true });
+          }
+
+          cb(null, fullPath);
+        },
         filename: (req, file, cb) => {
-          const type = (req.body?.type as string) || 'file';
+          const type = (req.params?.type as string) || 'file';
           const ext = extname(file.originalname).toLowerCase();
           const uniqueSuffix = `${Date.now()}-${Math.random()
             .toString(36)
             .slice(2, 8)}`;
-
-          // user id guard থেকে আসবে
-          const userId = (req as any).user?.id || 'unknown';
-          cb(null, `${type}-${userId}-${uniqueSuffix}${ext}`);
+          cb(null, `${type}-${uniqueSuffix}${ext}`);
         },
       }),
       limits: {
         fileSize: 5 * 1024 * 1024, // 5MB
       },
       fileFilter: (req, file, cb) => {
-        const type = req.body?.type as string;
+        const type = req.params?.type as string;
         const allowedImages = [
           'image/jpeg',
           'image/jpg',
@@ -122,19 +143,33 @@ export class AgentProfileController {
   async uploadDocument(
     @CurrentUser() user: CurrentUserType,
     @UploadedFile() file: Express.Multer.File,
-    @Body('type') type: string,
+    @Param('type') type: string,
   ) {
+    this.logger.log('===== UPLOAD DOCUMENT CALLED =====');
+    this.logger.log(`Type: ${type}`);
+    this.logger.log(`File: ${file?.filename}`);
+    this.logger.log(`Destination: ${file?.destination}`);
+
     if (!file) {
       throw new BadRequestException('No file uploaded');
     }
 
     const validTypes = ['nidCopy', 'tradeLicense', 'logo'];
     if (!type || !validTypes.includes(type)) {
+      // ✅ Invalid type হলে uploaded file delete করো
+      if (file.path && fs.existsSync(file.path)) {
+        fs.unlinkSync(file.path);
+      }
       throw new BadRequestException('Invalid document type');
     }
 
-    const publicPath = `/uploads/${file.filename}`;
+    // ✅ Public path generate (forward slash)
+    const subFolder = FOLDER_MAP[type];
+    const publicPath = `/uploads/${subFolder}/${file.filename}`;
 
+    this.logger.log(`Public path: ${publicPath}`);
+
+    // ✅ Service call করে DB update
     await this.agentProfileService.uploadDocument(
       user.actualUserId,
       type as 'nidCopy' | 'tradeLicense' | 'logo',
