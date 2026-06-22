@@ -14,7 +14,7 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
-import { extname } from 'path';
+import { extname, join } from 'path';  // ✅ Added join
 import * as fs from 'fs';
 import { JwtAuthGuard } from 'src/modules/auth/guard/jwt-auth.guard';
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
@@ -85,7 +85,6 @@ export class AgentProfileController {
   }
 
   // ── POST /api/v1/auth/profile/upload-document/:type ──
-  // type URL param এ আসবে → multer destination এ instantly available
   @Post('auth/profile/upload-document/:type')
   @UseInterceptors(
     FileInterceptor('file', {
@@ -93,9 +92,11 @@ export class AgentProfileController {
         destination: (req, file, cb) => {
           const type = (req.params?.type as string) || 'misc';
           const subFolder = FOLDER_MAP[type] || 'misc';
-          const fullPath = `./uploads/${subFolder}`;
+          
+          // ✅ Absolute path - works on both local & production
+          const fullPath = join(process.cwd(), 'uploads', subFolder);
 
-          // ✅ Folder না থাকলে বানাও
+          // ✅ Auto create folder
           if (!fs.existsSync(fullPath)) {
             fs.mkdirSync(fullPath, { recursive: true });
           }
