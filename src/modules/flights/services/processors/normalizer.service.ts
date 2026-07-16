@@ -1,9 +1,12 @@
 // src/modules/flights/services/processors/normalizer.service.ts
 import { Injectable } from '@nestjs/common';
 import { FareService } from './fare.service';
-import type { NormalizedFlight } from '../../types/flight.types';
+import type {
+  NormalizedFlight,
+  PassengerFare,
+  PaxWisePricing,
+} from '../../types/flight.types';
 
-// ── Layover type ──
 interface Layover {
   airport: string;
   cityName: string;
@@ -83,6 +86,14 @@ export class NormalizerService {
       ait: this.toMoney(priceBreakdown.admin.ait),
       currency: priceBreakdown.currency,
     };
+
+    // ✅ Extract Duffel per-passenger pricing
+    const duffelPassengers = offer.passengers || [];
+    const passengerFares: PassengerFare[] = this.extractDuffelPaxFares(
+      offer,
+      duffelPassengers,
+    );
+    const paxWisePricing = this.buildPaxWisePricing(passengerFares);
 
     const firstSeg = offer.slices?.[0]?.segments?.[0];
     const firstBaggages = firstSeg?.passengers?.[0]?.baggages || [];
@@ -199,6 +210,8 @@ export class NormalizerService {
       id: offer.id,
       price,
       priceBreakdown,
+      passengerFares,       // ✅
+      paxWisePricing,       // ✅
       itineraries,
       conditions,
       baggageInfo,
@@ -211,6 +224,7 @@ export class NormalizerService {
         paymentRequirements: offer.payment_requirements || {},
         expiresAt: offer.expires_at || '',
         totalEmissions: offer.total_emissions_kg || null,
+        rawOffer: offer,
       },
     };
   }
@@ -274,6 +288,13 @@ export class NormalizerService {
       ait: this.toMoney(priceBreakdown.admin.ait),
       currency: priceBreakdown.currency,
     };
+
+    // ✅ Extract Amadeus per-passenger pricing
+    const passengerFares: PassengerFare[] = this.extractAmadeusPaxFares(
+      travelerPricings,
+      currency,
+    );
+    const paxWisePricing = this.buildPaxWisePricing(passengerFares);
 
     const itineraries = (offer?.itineraries || []).map((itin: any) => {
       const segments = (itin?.segments || []).map((seg: any) => {
@@ -367,8 +388,7 @@ export class NormalizerService {
     });
 
     const firstTravelerFare = travelerPricings[0];
-    const firstFareDetail =
-      firstTravelerFare?.fareDetailsBySegment?.[0];
+    const firstFareDetail = firstTravelerFare?.fareDetailsBySegment?.[0];
     const firstCheckedQty =
       firstFareDetail?.includedCheckedBags?.quantity || 0;
     const firstCheckedWeight =
@@ -387,21 +407,21 @@ export class NormalizerService {
     };
 
     const conditions = {
-      refundable:
-        offer?.pricingOptions?.refundableFare === true || false,
+      refundable: offer?.pricingOptions?.refundableFare === true || false,
       changeable: false,
       refundPenalty: null,
       changePenalty: null,
       penaltyCurrency: currency,
     };
 
-    const firstItinFirstSeg =
-      offer?.itineraries?.[0]?.segments?.[0];
+    const firstItinFirstSeg = offer?.itineraries?.[0]?.segments?.[0];
 
     return {
       id: offer?.id || `AM-${Date.now()}`,
       price,
       priceBreakdown,
+      passengerFares,       // ✅
+      paxWisePricing,       // ✅
       itineraries,
       conditions,
       baggageInfo,
@@ -415,6 +435,7 @@ export class NormalizerService {
           offer?.pricingOptions?.includedCheckedBagsOnly || false,
         validatingAirlineCodes: offer?.validatingAirlineCodes || [],
         carrierCode: firstItinFirstSeg?.carrierCode || '',
+        rawOffer: offer,
       },
     };
   }
@@ -442,8 +463,6 @@ export class NormalizerService {
     },
   ): NormalizedFlight {
     const total = this.toNum(offer.price || 0);
-
-    // ✅ actual source currency
     const sourceCurrency = String(offer?.currency || 'USD').toUpperCase();
 
     const fareInput = {
@@ -467,6 +486,14 @@ export class NormalizerService {
       ait: this.toMoney(priceBreakdown.admin.ait),
       currency: priceBreakdown.currency,
     };
+
+    // ✅ Travelpayouts: pax-wise নাই, তাই estimated based on standard ratios
+    const passengerFares: PassengerFare[] = this.estimateTravelpayoutsPaxFares(
+      total,
+      sourceCurrency,
+      searchParams,
+    );
+    const paxWisePricing = this.buildPaxWisePricing(passengerFares);
 
     const cabin = (searchParams?.cabinClass || 'economy').toLowerCase();
     const cabinName =
@@ -588,14 +615,11 @@ export class NormalizerService {
     }
 
     return {
-
-  // ✅ FIXED: Travelpayouts link কে ID হিসেবে use করা যাবে না
-  // কারণ link-এর ভিতরে /, ?, & আছে যা URL ভেঙে দেয়
-  // তাই unique clean ID generate করা হচ্ছে
-  // `TP-${offer.airline || 'XX'}-${String(offer.origin || 'ORG').toUpperCase()}-${String(offer.destination || 'DST').toUpperCase()}-${String(offer.departure_at || '').replace(/[^a-zA-Z0-9]/g, '')}-${String(offer.flight_number || Math.random().toString(36).slice(2, 8))}`,
       id: this.generateTravelpayoutsId(offer),
       price,
       priceBreakdown,
+      passengerFares,       // ✅
+      paxWisePricing,       // ✅
       itineraries,
       conditions: {
         refundable: false,
@@ -625,6 +649,7 @@ export class NormalizerService {
         origin: offer.origin || '',
         destination: offer.destination || '',
         expiresAt: offer.expires_at || '',
+        rawOffer: offer,
       },
     };
   }
@@ -642,25 +667,234 @@ export class NormalizerService {
       this.normalizeTravelpayoutsOffer(offer, searchParams),
     );
   }
-  
-   // ===========HELPER FOR TRAVELPAYOUT ID==================
 
-  // ✅ Travelpayouts এর জন্য URL-safe unique ID generate 
-private generateTravelpayoutsId(offer: any): string {
-  const airline = String(offer?.airline || 'XX').toUpperCase();
-  const origin = String(offer?.origin || 'ORG').toUpperCase();
-  const destination = String(offer?.destination || 'DST').toUpperCase();
-  const flightNo = String(offer?.flight_number || '000');
+  // ==================== PAX FARE EXTRACTION HELPERS ====================
 
-  // departure date থেকে clean string
-  const dateStr = String(offer?.departure_at || '')
-    .replace(/[^a-zA-Z0-9]/g, '')
-    .slice(0, 14);
+  /**
+   * ✅ Extract per-passenger pricing from Amadeus travelerPricings
+   * Amadeus directly provides each pax type's actual fare
+   */
+  private extractAmadeusPaxFares(
+    travelerPricings: any[],
+    fallbackCurrency: string,
+  ): PassengerFare[] {
+    if (!Array.isArray(travelerPricings) || travelerPricings.length === 0) {
+      return [];
+    }
 
-  // price for uniqueness
-  const price = String(offer?.price || '0');
+    // Group by traveler type
+    const byType: Record<string, any[]> = {};
+    travelerPricings.forEach((tp) => {
+      const type = tp.travelerType || 'ADULT';
+      if (!byType[type]) byType[type] = [];
+      byType[type].push(tp);
+    });
 
-  return `TP-${airline}${flightNo}-${origin}${destination}-${dateStr}-${price}`;
-}
+    const fares: PassengerFare[] = [];
 
+    for (const type of Object.keys(byType)) {
+      const group = byType[type];
+      const first = group[0];
+
+      const baseFare = this.toNum(first?.price?.base || 0);
+      const totalFare = this.toNum(first?.price?.total || 0);
+      const taxAmount = Math.max(0, totalFare - baseFare);
+      const count = group.length;
+
+      fares.push({
+        travelerId: first.travelerId,
+        travelerType: type,
+        baseFare: this.round2(baseFare),
+        taxAmount: this.round2(taxAmount),
+        totalFare: this.round2(totalFare),
+        count,
+        subtotal: this.round2(totalFare * count),
+        currency: first?.price?.currency || fallbackCurrency,
+      });
+    }
+
+    return fares;
+  }
+
+  /**
+   * ✅ Extract per-passenger pricing from Duffel
+   * Duffel passengers array contains pax types
+   */
+  private extractDuffelPaxFares(
+    offer: any,
+    duffelPassengers: any[],
+  ): PassengerFare[] {
+    if (!Array.isArray(duffelPassengers) || duffelPassengers.length === 0) {
+      return [];
+    }
+
+    const total = this.toNum(offer.total_amount || 0);
+    const base = this.toNum(offer.base_amount || total);
+    const tax = Math.max(0, total - base);
+    const currency = offer.total_currency || 'USD';
+
+    // Standard ratios for Duffel (since Duffel doesn't give per-pax breakdown)
+    const ratios: Record<string, number> = {
+      adult: 1.0,
+      child: 0.75,
+      infant_without_seat: 0.1,
+      infant_with_seat: 0.75,
+    };
+
+    // Count by type
+    const countByType: Record<string, number> = {};
+    duffelPassengers.forEach((p) => {
+      const type = p.type || 'adult';
+      countByType[type] = (countByType[type] || 0) + 1;
+    });
+
+    // Calculate weighted total
+    let weightedTotal = 0;
+    for (const type of Object.keys(countByType)) {
+      weightedTotal += (ratios[type] || 1.0) * countByType[type];
+    }
+
+    const baseAdult = weightedTotal > 0 ? base / weightedTotal : base;
+    const taxAdult = weightedTotal > 0 ? tax / weightedTotal : tax;
+
+    const fares: PassengerFare[] = [];
+    for (const type of Object.keys(countByType)) {
+      const ratio = ratios[type] || 1.0;
+      const count = countByType[type];
+
+      const baseFare = this.round2(baseAdult * ratio);
+      const taxAmount = this.round2(taxAdult * ratio);
+      const totalFare = this.round2(baseFare + taxAmount);
+
+      // Map Duffel type → standard type
+      const mappedType =
+        type === 'adult'
+          ? 'ADULT'
+          : type === 'child'
+            ? 'CHILD'
+            : 'HELD_INFANT';
+
+      fares.push({
+        travelerType: mappedType,
+        baseFare,
+        taxAmount,
+        totalFare,
+        count,
+        subtotal: this.round2(totalFare * count),
+        currency,
+      });
+    }
+
+    return fares;
+  }
+
+  /**
+   * ✅ Estimate per-pax fares for Travelpayouts (no breakdown available)
+   * Uses standard airline ratios: Adult 100%, Child 75%, Infant 10%
+   */
+  private estimateTravelpayoutsPaxFares(
+    totalFare: number,
+    currency: string,
+    searchParams?: {
+      adults?: number;
+      children?: number;
+      infants?: number;
+    },
+  ): PassengerFare[] {
+    const adults = Math.max(1, searchParams?.adults || 1);
+    const children = Math.max(0, searchParams?.children || 0);
+    const infants = Math.max(0, searchParams?.infants || 0);
+
+    const adultRatio = 1.0;
+    const childRatio = 0.75;
+    const infantRatio = 0.1;
+
+    const weightedTotal =
+      adults * adultRatio + children * childRatio + infants * infantRatio;
+
+    const adultFare = weightedTotal > 0 ? totalFare / weightedTotal : totalFare;
+
+    const fares: PassengerFare[] = [];
+
+    if (adults > 0) {
+      const baseFare = this.round2(adultFare * adultRatio);
+      fares.push({
+        travelerType: 'ADULT',
+        baseFare,
+        taxAmount: 0,
+        totalFare: baseFare,
+        count: adults,
+        subtotal: this.round2(baseFare * adults),
+        currency,
+      });
+    }
+
+    if (children > 0) {
+      const baseFare = this.round2(adultFare * childRatio);
+      fares.push({
+        travelerType: 'CHILD',
+        baseFare,
+        taxAmount: 0,
+        totalFare: baseFare,
+        count: children,
+        subtotal: this.round2(baseFare * children),
+        currency,
+      });
+    }
+
+    if (infants > 0) {
+      const baseFare = this.round2(adultFare * infantRatio);
+      fares.push({
+        travelerType: 'HELD_INFANT',
+        baseFare,
+        taxAmount: 0,
+        totalFare: baseFare,
+        count: infants,
+        subtotal: this.round2(baseFare * infants),
+        currency,
+      });
+    }
+
+    return fares;
+  }
+
+  /**
+   * ✅ Build pax-wise pricing summary from passenger fares
+   */
+  private buildPaxWisePricing(passengerFares: PassengerFare[]): PaxWisePricing {
+    const adult = passengerFares.find((p) => p.travelerType === 'ADULT');
+    const child = passengerFares.find((p) => p.travelerType === 'CHILD');
+    const infant = passengerFares.find(
+      (p) =>
+        p.travelerType === 'HELD_INFANT' ||
+        p.travelerType === 'SEATED_INFANT',
+    );
+
+    return {
+      adult: adult || null,
+      child: child || null,
+      infant: infant || null,
+    };
+  }
+
+  private round2(value: number): number {
+    return Math.round(value * 100) / 100;
+  }
+
+  // ===========HELPER FOR TRAVELPAYOUT ID==================
+
+  private generateTravelpayoutsId(offer: any): string {
+    const airline = String(offer?.airline || 'XX').toUpperCase();
+    const origin = String(offer?.origin || 'ORG').toUpperCase();
+    const destination = String(offer?.destination || 'DST').toUpperCase();
+    const flightNo = String(offer?.flight_number || '000');
+
+    const dateStr = String(offer?.departure_at || '')
+      .replace(/[^a-zA-Z0-9]/g, '')
+      .slice(0, 14);
+
+    const price = String(offer?.price || '0');
+
+    return `TP-${airline}${flightNo}-${origin}${destination}-${dateStr}-${price}`;
+  }
 }

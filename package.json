@@ -1,8 +1,10 @@
 {
   "name": "api",
+  "description": "MIJI api ",
+  "author": "mijimax",
   "version": "0.0.1",
   "private": true,
-  "license": "UNLICENSED",
+  "license": "mijimax",
   "scripts": {
     "build": "nest build",
     "start": "nest start",

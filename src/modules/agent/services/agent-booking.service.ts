@@ -7,12 +7,20 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { computeBookingPayment } from 'src/common/lib/accounting';
+import { AmadeusService } from 'src/modules/flights/services/providers/amadeus.service';
+import { DuffelService } from 'src/modules/flights/services/providers/duffel.service';
+import { TravelpayoutsService } from 'src/modules/flights/services/providers/travelpayouts.service';
 
 @Injectable()
 export class AgentBookingService {
   private readonly logger = new Logger(AgentBookingService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly amadeusService: AmadeusService,
+    private readonly duffelService: DuffelService,
+    private readonly travelpayoutsService: TravelpayoutsService,
+  ) {}
 
   // ──────────────────────────────────────────────
   // GET ALL BOOKINGS
@@ -39,6 +47,8 @@ export class AgentBookingService {
       },
       tripType: b.tripType,
       pnr: b.pnr,
+      airlinePnr: b.airlinePnr,
+      supplier: b.supplier,
       carrier: b.carrier,
       route: b.route,
       departureDate: b.departureDate,
@@ -88,7 +98,6 @@ export class AgentBookingService {
 
     if (!booking) throw new NotFoundException('Booking not found');
 
-    // Request reviewer info load করো
     const processedIds = [
       ...new Set(
         booking.requests
@@ -110,33 +119,15 @@ export class AgentBookingService {
         })
       : [];
 
-    // reviewer id → display name map
     const reviewerMap = new Map(
-  reviewers.map((u) => {
-    const displayName =
-      `${u.firstName || ''} ${u.lastName || ''}`.trim() ||
-      u.email ||
-      u.id;
-
-    return [u.id, displayName];
-  }),
-);
-  /*   const reviewerMap = new Map(
       reviewers.map((u) => {
-        let displayName = '';
-        if (u.role === 'ADMIN') {
-          displayName = `Admin ${u.firstName ||u.lastName  || ''}`.trim();
-        } else if (u.role === 'MANAGER') {
-          displayName = `Manager ${ u.firstName || u.lastName || ''}`.trim();
-        } else {
-          displayName =
-            `${u.firstName || ''} ${u.lastName || ''}`.trim() ||
-            u.email ||
-            u.id;
-        }
+        const displayName =
+          `${u.firstName || ''} ${u.lastName || ''}`.trim() ||
+          u.email ||
+          u.id;
         return [u.id, displayName];
       }),
-    ); */
+    );
 
     return {
       id: booking.id,
@@ -147,6 +138,9 @@ export class AgentBookingService {
       departureDate: booking.departureDate,
       returnDate: booking.returnDate,
       pnr: booking.pnr,
+      airlinePnr: booking.airlinePnr,
+      supplier: booking.supplier,
+      supplierOrderId: booking.supplierOrderId,
       carrier: booking.carrier,
       currency: booking.currency,
       cabinClass: booking.cabinClass,
@@ -231,6 +225,8 @@ export class AgentBookingService {
 
   // ──────────────────────────────────────────────
   // SUBMIT BOOKING REQUEST (Issue / Cancel / Void)
+  // Issue Request দিলে Balance/Credit Deduct হবে (PENDING status)
+  // Admin approve করলে → TICKET (COMPLETED) হবে
   // ──────────────────────────────────────────────
   async submitRequest(
     agentId: string,
@@ -245,14 +241,13 @@ export class AgentBookingService {
     if (!bookingId) throw new BadRequestException('Booking ID is required');
     if (!type) throw new BadRequestException('Request type is required');
 
-    // booking exists এবং এই agent-এর কিনা check
     const booking = await this.prisma.booking.findFirst({
       where: { id: bookingId, agentId },
+      include: { passengers: true },
     });
 
     if (!booking) throw new NotFoundException('Booking not found');
 
-    // same type-এর pending request আগে থেকে আছে কিনা check
     const existing = await this.prisma.bookingRequest.findFirst({
       where: {
         bookingId,
@@ -265,81 +260,18 @@ export class AgentBookingService {
       throw new BadRequestException(`A ${type} request is already pending`);
     }
 
-    const request = await this.prisma.bookingRequest.create({
-      data: {
-        bookingId,
-        agentId,
-        type: type as any,
-        status: 'PENDING',
-        remarks: remarks || null,
-      },
-    });
+    // ══════════════════════════════════════════
+    // ISSUE REQUEST → Balance/Credit Deduct (PENDING)
+    // ══════════════════════════════════════════
+    if (type === 'ISSUE') {
+      const fare = Number(booking.net || 0);
 
-    this.logger.log(
-      `✅ Request created | Type: ${type} | Booking: ${bookingId} | Agent: ${agentId}`,
-    );
+      if (fare <= 0) {
+        throw new BadRequestException('Invalid booking fare for issue');
+      }
 
-    return {
-      success: true,
-      requestId: request.id,
-      message: `${type} request submitted successfully`,
-    };
-  }
-
-  // ──────────────────────────────────────────────
-  // CREATE BOOKING
-  // ──────────────────────────────────────────────
-  async createBooking(agentId: string, body: any) {
-    try {
-      // ── Body থেকে দরকারি fields নাও ──
-      const {
-        carrier,
-        origin,
-        destination,
-        departure,
-        arrival,
-        tripType,
-        netFare,
-        baseFare,
-        segments,
-        passengers,
-        checkedBag,
-        cabinBag,
-        checkedBagRaw,
-        cabinBagRaw,
-        refundable,
-        changeable,
-        refundPenalty,
-        changePenalty,
-        cabinClass,
-        currency,
-      } = body;
-
-      const fare = Number(netFare);
-      const grossFare = Number(baseFare) || fare;
-
-      // ── Input Validation ──
-      if (!agentId) throw new BadRequestException('Agent ID is missing');
-      if (isNaN(fare) || fare <= 0) throw new BadRequestException('Invalid fare amount');
-      if (!carrier || !origin || !destination || !departure || !tripType)
-        throw new BadRequestException('Missing required booking fields');
-      if (!Array.isArray(passengers) || passengers.length === 0)
-        throw new BadRequestException('Passengers are required');
-      if (!Array.isArray(segments) || segments.length === 0)
-        throw new BadRequestException('Segments are required');
-
-      // ── Unique PNR এবং Booking ID generate করো ──
-      const pnr = await this.getUniquePNR();
-      const bookingId = `MBK${Date.now()}`;
-
-      // ══════════════════════════════════════════
-      // DB TRANSACTION — Core booking operations
-      // শুধু critical DB writes এখানে থাকবে
-      // Notification transaction-এর বাইরে হবে
-      // ══════════════════════════════════════════
       const result = await this.prisma.$transaction(
         async (tx) => {
-          // ── Step 1: Agent info fetch ──
           const agent = await tx.user.findUnique({
             where: { id: agentId },
             select: {
@@ -355,18 +287,6 @@ export class AgentBookingService {
 
           if (!agent) throw new NotFoundException('Agent account not found');
 
-          const issuedByName =
-            agent.agentName ||
-            `${agent.firstName || ''} ${agent.lastName || ''}`.trim() ||
-            'Unknown';
-
-          const agentDisplayName =
-            agent.agentName?.trim() ||
-            `${agent.firstName ?? ''} ${agent.lastName ?? ''}`.trim() ||
-            'Agent';
-
-          // ── Step 2: Payment breakdown calculate করো ──
-          // Balance থেকে কত নেবে, Credit থেকে কত নেবে
           let payment: ReturnType<typeof computeBookingPayment>;
           try {
             payment = computeBookingPayment({
@@ -382,8 +302,7 @@ export class AgentBookingService {
             throw err;
           }
 
-          // ── Step 3: Agent balance update করো ──
-          // select দিয়ে updated value নিচ্ছি — ledger-এ use করব
+          // Deduct balance/credit (held until admin approves)
           const updatedAgent = await tx.user.update({
             where: { id: agentId },
             data: {
@@ -396,11 +315,451 @@ export class AgentBookingService {
             },
           });
 
-          // ── Step 4: Booking create করো (passengers + segments সহ) ──
+          await tx.booking.update({
+            where: { id: bookingId },
+            data: {
+              remarks:
+                payment.fromCredit > 0
+                  ? `Payment: ${payment.fromBalance > 0 ? `Balance ${payment.fromBalance} + ` : ''}Credit ${payment.fromCredit} ${booking.currency || 'SAR'}`
+                  : `Payment: Balance ${payment.fromBalance} ${booking.currency || 'SAR'}`,
+            },
+          });
+
+          const passengerNames = booking.passengers
+            .map((p) => `${p.firstName} ${p.lastName}`)
+            .join(', ');
+
+          const totalDebit =
+            Number(payment.fromBalance || 0) +
+            Number(payment.fromCredit || 0);
+
+          const ledgerBalanceAfter =
+            Number(updatedAgent.balance || 0) -
+            Number(updatedAgent.usedLimit || 0);
+
+          // ✅ Issue Request Ledger Entry (PENDING - awaiting admin approval)
+          await tx.agentLedger.create({
+            data: {
+              userId: agentId,
+              type: 'TICKET_REQUESTED', // ✅ Pending - not yet issued
+              sourceType: 'BOOKING',
+              sourceId: booking.id,
+              bookingId: booking.id,
+              invoiceNo: `INV-${booking.bookingId}`,
+              debit: totalDebit,
+              credit: 0,
+              balanceAfter: ledgerBalanceAfter,
+              currency: booking.currency || 'SAR',
+              pnr: booking.pnr,
+              reference: booking.bookingId,
+              description: `Issue Request | ${booking.route} | PNR: ${booking.pnr} | ${booking.carrier} | Pax: ${passengerNames} | Payment: Balance ${payment.fromBalance} + Credit ${payment.fromCredit}`,
+              status: 'PENDING', // ✅ Pending until admin approves
+              createdBy: agent.agentName || agentId,
+            },
+          });
+
+          await tx.payment.create({
+            data: {
+              bookingId: booking.id,
+              userId: agentId,
+              amount: fare,
+              currency: booking.currency || 'SAR',
+              method: 'MANUAL',
+              status: 'SUCCESS',
+              paidAt: new Date(),
+              transactionId: `ISS-${booking.bookingId}`,
+            },
+          });
+
+          const request = await tx.bookingRequest.create({
+            data: {
+              bookingId,
+              agentId,
+              type: type as any,
+              status: 'PENDING',
+              remarks: remarks || null,
+            },
+          });
+
+          return { request, payment };
+        },
+        { timeout: 10000 },
+      );
+
+      // ── Notification ──
+      try {
+        const admins = await this.prisma.user.findMany({
+          where: { role: { in: ['ADMIN', 'MANAGER'] } },
+          select: { id: true },
+        });
+
+        if (admins.length > 0) {
+          await this.prisma.notification.createMany({
+            data: admins.map((admin) => ({
+              userId: admin.id,
+              type: 'request',
+              title: '📩 Issue Request',
+              message: `Issue request for ${booking.bookingId} | PNR: ${booking.pnr} | Amount: ${fare} ${booking.currency || 'SAR'} deducted (pending approval)`,
+              action: '/admin/bookings/requests',
+              read: false,
+            })),
+          });
+        }
+      } catch (notifyError: any) {
+        this.logger.warn(
+          `Issue request notification failed: ${notifyError?.message}`,
+        );
+      }
+
+      this.logger.log(
+        `Issue Request created | Booking: ${bookingId} | Agent: ${agentId} | Amount: ${fare} (pending approval)`,
+      );
+
+      return {
+        success: true,
+        requestId: result.request.id,
+        deducted: {
+          fromBalance: result.payment.fromBalance,
+          fromCredit: result.payment.fromCredit,
+          total: result.payment.fare,
+        },
+        message: `Issue request submitted | ${fare} ${booking.currency || 'SAR'} held pending admin approval`,
+      };
+    }
+
+    // ══════════════════════════════════════════
+    // CANCEL / VOID / REISSUE / REFUND (no deduction yet)
+    // ══════════════════════════════════════════
+    const request = await this.prisma.bookingRequest.create({
+      data: {
+        bookingId,
+        agentId,
+        type: type as any,
+        status: 'PENDING',
+        remarks: remarks || null,
+      },
+    });
+
+    this.logger.log(
+      `Request created | Type: ${type} | Booking: ${bookingId} | Agent: ${agentId}`,
+    );
+
+    return {
+      success: true,
+      requestId: request.id,
+      message: `${type} request submitted successfully`,
+    };
+  }
+
+  // ──────────────────────────────────────────────
+  // CREATE BOOKING — Multi-GDS Ready (Amadeus + Duffel)
+  // ──────────────────────────────────────────────
+  async createBooking(agentId: string, body: any) {
+    let supplierOrderId: string | null = null;
+    let supplier: string = 'AMADEUS';
+
+    try {
+      const {
+        flightOffer,
+        passengers,
+        contact,
+        tripType,
+        checkedBag,
+        cabinBag,
+        checkedBagRaw,
+        cabinBagRaw,
+        refundable,
+        changeable,
+        refundPenalty,
+        changePenalty,
+        cabinClass,
+        netFare,
+        baseFare,
+        currency: frontendCurrency,
+      } = body;
+
+      // ── Input Validation ──
+      if (!agentId) throw new BadRequestException('Agent ID is missing');
+      if (!flightOffer)
+        throw new BadRequestException('flightOffer is required');
+      if (!Array.isArray(passengers) || passengers.length === 0)
+        throw new BadRequestException('Passengers are required');
+      if (!tripType) throw new BadRequestException('tripType is required');
+
+      // ══════════════════════════════════════════
+      // MULTI-GDS PROVIDER ROUTING
+      // ══════════════════════════════════════════
+      const provider = flightOffer?.provider;
+
+      if (provider === 'travelpayouts') {
+        throw new BadRequestException(
+          'Travelpayouts bookings require redirect to affiliate. Direct booking not supported.',
+        );
+      }
+
+      if (!['amadeus', 'duffel'].includes(provider)) {
+        throw new BadRequestException(
+          `Booking not supported for provider: ${provider}. Supported: Amadeus, Duffel.`,
+        );
+      }
+
+      supplier = provider.toUpperCase(); // "AMADEUS" | "DUFFEL"
+
+      // Get provider service & raw offer dynamically
+      let providerService: AmadeusService | DuffelService;
+      let rawOffer: any;
+
+      if (provider === 'amadeus') {
+        providerService = this.amadeusService;
+        rawOffer = flightOffer?._amadeus?.rawOffer;
+
+        if (!rawOffer?.type || rawOffer.type !== 'flight-offer') {
+          throw new BadRequestException(
+            'Invalid Amadeus flight offer. Please search again.',
+          );
+        }
+      } else {
+        // duffel
+        providerService = this.duffelService;
+        rawOffer = flightOffer?._duffel?.rawOffer;
+
+        if (!rawOffer?.id) {
+          throw new BadRequestException(
+            'Invalid Duffel flight offer. Please search again.',
+          );
+        }
+      }
+
+      this.logger.log(`Provider: ${supplier}`);
+
+      // ══════════════════════════════════════════
+      // STEP 1: Provider Price Confirm
+      // ══════════════════════════════════════════
+      this.logger.log(`Confirming flight price with ${supplier}...`);
+
+      const pricing = await providerService.confirmPrice(rawOffer);
+
+      if (!pricing.ok || !pricing.data?.flightOffers?.length) {
+        const errorMsg =
+          pricing.error?.message || 'Flight price confirmation failed';
+        throw new BadRequestException(errorMsg);
+      }
+
+      const pricedOffer = pricing.data.flightOffers[0];
+
+      // ══════════════════════════════════════════
+      // PRICE HANDLING — Universal for all providers
+      // ══════════════════════════════════════════
+      let providerRawFare = 0;
+      let providerRawCurrency = 'USD';
+
+      if (provider === 'amadeus') {
+        providerRawFare = Number(pricedOffer?.price?.grandTotal || 0);
+        providerRawCurrency = pricedOffer?.price?.currency || 'USD';
+      } else if (provider === 'duffel') {
+        providerRawFare = Number(pricedOffer?.total_amount || 0);
+        providerRawCurrency = pricedOffer?.total_currency || 'USD';
+      }
+
+      // Frontend converted price (actual deduct)
+      const fare = Number(netFare || 0);
+      const currency = frontendCurrency || 'SAR';
+
+      if (!fare || fare <= 0) {
+        throw new BadRequestException('Invalid fare amount from frontend');
+      }
+
+      this.logger.log(`Agent Pays: ${fare} ${currency}`);
+
+      // ══════════════════════════════════════════
+      // Extract route info (Universal)
+      // ══════════════════════════════════════════
+      let origin = '';
+      let destination = '';
+      let departure = '';
+      let arrival = '';
+      let carrier = 'N/A';
+      let segmentsData: any[] = [];
+
+      if (provider === 'amadeus') {
+        const firstItinerary = pricedOffer?.itineraries?.[0];
+        const firstSegment = firstItinerary?.segments?.[0];
+        const lastSegment =
+          firstItinerary?.segments?.[firstItinerary.segments.length - 1];
+
+        origin = firstSegment?.departure?.iataCode;
+        destination = lastSegment?.arrival?.iataCode;
+        departure = firstSegment?.departure?.at;
+        arrival = lastSegment?.arrival?.at;
+        carrier = firstSegment?.carrierCode || 'N/A';
+
+        segmentsData =
+          firstItinerary?.segments?.map((s: any) => ({
+            from: s.departure?.iataCode,
+            to: s.arrival?.iataCode,
+            departure: new Date(s.departure?.at),
+            arrival: new Date(s.arrival?.at),
+            flightNo: `${s.carrierCode}${s.number}`,
+            airline: s.carrierCode,
+          })) || [];
+      } else if (provider === 'duffel') {
+        const firstSlice = pricedOffer?.slices?.[0];
+        const firstSegment = firstSlice?.segments?.[0];
+        const lastSegment =
+          firstSlice?.segments?.[firstSlice.segments.length - 1];
+
+        origin = firstSegment?.origin?.iata_code;
+        destination = lastSegment?.destination?.iata_code;
+        departure = firstSegment?.departing_at;
+        arrival = lastSegment?.arriving_at;
+        carrier =
+          firstSegment?.marketing_carrier?.iata_code ||
+          firstSegment?.operating_carrier?.iata_code ||
+          'N/A';
+
+        segmentsData =
+          firstSlice?.segments?.map((s: any) => ({
+            from: s.origin?.iata_code,
+            to: s.destination?.iata_code,
+            departure: new Date(s.departing_at),
+            arrival: new Date(s.arriving_at),
+            flightNo: `${s.marketing_carrier?.iata_code}${s.marketing_carrier_flight_number}`,
+            airline: s.marketing_carrier?.iata_code,
+          })) || [];
+      }
+
+      if (!origin || !destination || !departure) {
+        throw new BadRequestException('Invalid flight offer structure');
+      }
+
+      // ══════════════════════════════════════════
+      // STEP 2: Agent Balance/Credit CHECK ONLY
+      // ══════════════════════════════════════════
+      const agent = await this.prisma.user.findUnique({
+        where: { id: agentId },
+        select: {
+          id: true,
+          agentName: true,
+          balance: true,
+          creditLimit: true,
+          usedLimit: true,
+          firstName: true,
+          lastName: true,
+        },
+      });
+
+      if (!agent) throw new NotFoundException('Agent account not found');
+
+      const availableBalance = Number(agent.balance || 0);
+      const availableCredit =
+        Number(agent.creditLimit || 0) - Number(agent.usedLimit || 0);
+      const totalAvailable = availableBalance + availableCredit;
+
+      if (totalAvailable < fare) {
+        throw new BadRequestException('INSUFFICIENT_BALANCE');
+      }
+
+      const issuedByName =
+        agent.agentName ||
+        `${agent.firstName || ''} ${agent.lastName || ''}`.trim() ||
+        'Unknown';
+
+      const agentDisplayName =
+        agent.agentName?.trim() ||
+        `${agent.firstName ?? ''} ${agent.lastName ?? ''}`.trim() ||
+        'Agent';
+
+      // ══════════════════════════════════════════
+      // STEP 3: Provider Real Order Create → Real PNR
+      // ══════════════════════════════════════════
+      this.logger.log(`Creating real ${supplier} order...`);
+
+      const travelers = this.toAmadeusTravelers(passengers);
+      const contacts = this.toAmadeusContacts(passengers, contact);
+
+      const orderRes = await providerService.createOrder(
+        pricedOffer,
+        travelers,
+        contacts,
+      );
+
+      if (!orderRes.ok || !orderRes.order) {
+        const errorMsg =
+          orderRes.error?.message || `${supplier} order creation failed`;
+
+        if (
+          errorMsg.includes('sell segment') ||
+          errorMsg.includes('SEGMENT') ||
+          errorMsg.includes('unavailable')
+        ) {
+          throw new BadRequestException(
+            'This flight is no longer available. Please search again with fresh offers.',
+          );
+        }
+
+        throw new BadRequestException(errorMsg);
+      }
+
+      supplierOrderId = orderRes.order?.id || null;
+
+      // Extract PNRs (Universal)
+      const associatedRecords = orderRes.order?.associatedRecords || [];
+
+      const gdsPnr =
+        associatedRecords.find((r: any) => r.originSystemCode === 'GDS')
+          ?.reference ||
+        associatedRecords[0]?.reference ||
+        null;
+
+      const airlinePnr =
+        associatedRecords.find(
+          (r: any) =>
+            r.originSystemCode &&
+            r.originSystemCode !== 'GDS' &&
+            r.reference !== gdsPnr,
+        )?.reference || null;
+
+      if (!gdsPnr) {
+        throw new BadRequestException('PNR not returned from supplier');
+      }
+
+      this.logger.log(`GDS PNR: ${gdsPnr} | Supplier: ${supplier}`);
+
+      const bookingId = `MBK${Date.now()}`;
+
+      // ══════════════════════════════════════════
+      // STEP 4: DB Save — Converted Price
+      // ══════════════════════════════════════════
+      const result = await this.prisma.$transaction(
+        async (tx) => {
           const booking = await tx.booking.create({
             data: {
               bookingId,
-              pnr,
+              pnr: gdsPnr,
+              airlinePnr: airlinePnr,
+              supplier: supplier,
+              supplierOrderId: supplierOrderId,
+
+              // Audit: Both prices saved
+              supplierData: {
+                rawOrder: orderRes.order,
+                pricing: {
+                  provider: {
+                    amount: providerRawFare,
+                    currency: providerRawCurrency,
+                    name: supplier,
+                  },
+                  agent: {
+                    amount: fare,
+                    currency: currency,
+                  },
+                  exchangeRate:
+                    providerRawFare > 0
+                      ? Math.round((fare / providerRawFare) * 10000) / 10000
+                      : 1,
+                },
+              },
+
               status: 'ON_HOLD',
               tripType: tripType as any,
               route: `${origin}-${destination}`,
@@ -409,10 +768,12 @@ export class AgentBookingService {
               issuedBy: issuedByName,
               carrier,
               agentId,
+
               net: fare,
-              gross: grossFare,
+              gross: fare,
               commission: 0,
-              currency: currency || 'SAR',
+              currency: currency,
+
               cabinClass: cabinClass || 'Economy',
               baggageInfo: {
                 checked: checkedBag || 'Not Included',
@@ -426,10 +787,17 @@ export class AgentBookingService {
                 refundPenalty: refundPenalty || null,
                 changePenalty: changePenalty || null,
               },
-              remarks:
-                payment.fromCredit > 0
-                  ? `Payment: ${payment.fromBalance > 0 ? `Balance ${payment.fromBalance} + ` : ''}Credit ${payment.fromCredit} SAR`
-                  : `Payment: Balance ${payment.fromBalance} SAR`,
+              remarks: `${supplier} Order: ${supplierOrderId}`,
+              priceBreakdown:
+                pricedOffer?.price ||
+                (pricedOffer?.total_amount
+                  ? {
+                      total: pricedOffer.total_amount,
+                      base: pricedOffer.base_amount,
+                      currency: pricedOffer.total_currency,
+                    }
+                  : null),
+
               passengers: {
                 create: passengers.map((p: any) => ({
                   title: p.title as any,
@@ -437,7 +805,9 @@ export class AgentBookingService {
                   lastName: p.lastName,
                   type: p.type as any,
                   gender: p.gender as any,
-                  dateOfBirth: p.dateOfBirth ? new Date(p.dateOfBirth) : null,
+                  dateOfBirth: p.dateOfBirth
+                    ? new Date(p.dateOfBirth)
+                    : null,
                   nationality: p.nationality,
                   passportNumber: p.passportNumber || null,
                   passportExpiry: p.passportExpiry
@@ -447,89 +817,28 @@ export class AgentBookingService {
                   phone: p.phone || null,
                 })),
               },
+
               segments: {
-                create: segments.map((s: any) => ({
-                  from: s.from,
-                  to: s.to,
-                  departure: new Date(s.departure),
-                  arrival: new Date(s.arrival),
-                  flightNo: s.flightNo,
-                  airline: s.airline,
-                })),
+                create: segmentsData,
               },
             },
           });
 
-          // ── Step 5: Ledger entry (১টাই row — 1 booking = 1 ledger) ──
-          const passengerNames = passengers
-            .map((p: any) => `${p.firstName} ${p.lastName}`)
-            .join(', ');
-
-          // Total debit = balance part + credit part
-          const totalDebit =
-            Number(payment.fromBalance || 0) + Number(payment.fromCredit || 0);
-
-          // Net account position = wallet balance - used credit limit
-          // Example: balance=0, usedLimit=714 → balanceAfter = -714
-          const ledgerBalanceAfter =
-            Number(updatedAgent.balance || 0) -
-            Number(updatedAgent.usedLimit || 0);
-
-          await tx.agentLedger.create({
-            data: {
-              userId: agentId,
-              type: 'ON_HOLD',
-              sourceType: 'BOOKING',
-              sourceId: booking.id,
-              bookingId: booking.id,
-              invoiceNo: `INV-${bookingId}`,
-              debit: totalDebit,
-              credit: 0,
-              balanceAfter: ledgerBalanceAfter,
-              currency: currency || 'SAR',
-              pnr,
-              reference: bookingId,
-              description: `Booking ON HOLD | ${origin}-${destination} | PNR: ${pnr} | ${carrier} | Pax: ${passengerNames} | Payment Split: Balance ${payment.fromBalance} + Credit ${payment.fromCredit}`,
-              status: 'COMPLETED',
-              createdBy: agent.agentName || agentId,
-            },
-          });
-
-          // ── Step 6: Payment record ──
-          await tx.payment.create({
-            data: {
-              bookingId: booking.id,
-              userId: agentId,
-              amount: fare,
-              currency: currency || 'SAR',
-              method: 'MANUAL',
-              status: 'SUCCESS',
-              paidAt: new Date(),
-              transactionId: bookingId,
-            },
-          });
-
-          // transaction থেকে যা দরকার return করো
           return {
             booking,
-            payment,
             agentInfo: {
               id: agent.id,
               name: agentDisplayName,
             },
           };
         },
-        {
-          timeout: 10000, // 10 seconds — complex booking-এর জন্য safe
-        },
+        { timeout: 10000 },
       );
 
       // ══════════════════════════════════════════
-      // NOTIFICATION — Transaction-এর বাইরে
-      // Notification fail হলেও booking rollback হবে না
+      // NOTIFICATION
       // ══════════════════════════════════════════
       try {
-        // Agent-কে notification দাও
         await this.prisma.notification.create({
           data: {
             userId: result.agentInfo.id,
@@ -541,7 +850,6 @@ export class AgentBookingService {
           },
         });
 
-        // সব Admin ও Manager-দের notification দাও
         const admins = await this.prisma.user.findMany({
           where: { role: { in: ['ADMIN', 'MANAGER'] } },
           select: { id: true },
@@ -560,29 +868,48 @@ export class AgentBookingService {
           });
         }
       } catch (notifyError: any) {
-        // Notification fail হলে শুধু warn করো, booking সফল
         this.logger.warn(
           `Booking created but notification failed: ${notifyError?.message}`,
         );
       }
 
-      // ── Final Response ──
       return {
         success: true,
+        id: result.booking.id,
         bookingId: result.booking.bookingId,
         pnr: result.booking.pnr,
-        paymentMethod: result.payment.paymentMethod,
-        deducted: {
-          fromBalance: result.payment.fromBalance,
-          fromCredit: result.payment.fromCredit,
-          total: result.payment.fare,
-        },
-        message: 'Booking created successfully',
+        airlinePnr: result.booking.airlinePnr,
+        supplier: result.booking.supplier,
+        supplierOrderId: result.booking.supplierOrderId,
+        message: 'Booking created successfully (ON HOLD)',
       };
     } catch (error: any) {
-      this.logger.error('Booking creation failed', error?.message);
+      this.logger.error('Booking creation failed');
 
-      // Known errors সরাসরি throw করো
+      // Rollback supplier order if DB save fails
+      if (supplierOrderId) {
+        try {
+          let cancelService: AmadeusService | DuffelService | null = null;
+
+          if (supplier === 'AMADEUS') {
+            cancelService = this.amadeusService;
+          } else if (supplier === 'DUFFEL') {
+            cancelService = this.duffelService;
+          }
+
+          if (cancelService) {
+            await cancelService.cancelOrder(supplierOrderId);
+            this.logger.warn(
+              `Rolled back ${supplier} order: ${supplierOrderId}`,
+            );
+          }
+        } catch (cancelErr: any) {
+          this.logger.error(
+            `Failed to rollback ${supplier} order: ${supplierOrderId}`,
+          );
+        }
+      }
+
       if (
         error instanceof BadRequestException ||
         error instanceof NotFoundException
@@ -590,31 +917,193 @@ export class AgentBookingService {
         throw error;
       }
 
-      // Unknown errors → generic 500
       throw new InternalServerErrorException('Booking failed');
     }
   }
 
-  // ──────────────────────────────────────────────
-  // PNR Generator — 6 character alphanumeric
-  // ──────────────────────────────────────────────
-  private generatePNR(): string {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    let pnr = '';
-    for (let i = 0; i < 6; i++) {
-      pnr += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return pnr;
+  // ══════════════════════════════════════════════════════
+  // HELPERS: Amadeus traveler format
+  // ══════════════════════════════════════════════════════
+  private mapTravelerType(type?: string): string {
+    const t = (type || '').toUpperCase();
+    if (t === 'CHILD') return 'CHILD';
+    if (t === 'INFANT') return 'HELD_INFANT';
+    return 'ADULT';
   }
 
-  // Unique PNR — DB-তে আগে থেকে নেই নিশ্চিত করো
-  private async getUniquePNR(): Promise<string> {
-    let pnr = this.generatePNR();
-    let exists = await this.prisma.booking.findFirst({ where: { pnr } });
-    while (exists) {
-      pnr = this.generatePNR();
-      exists = await this.prisma.booking.findFirst({ where: { pnr } });
-    }
-    return pnr;
+  private mapGender(gender?: string): string {
+    const g = (gender || '').toUpperCase();
+    if (g === 'FEMALE') return 'FEMALE';
+    return 'MALE';
+  }
+
+  private formatDateOnly(value?: string | Date | null): string | undefined {
+    if (!value) return undefined;
+    const d = new Date(value);
+    if (isNaN(d.getTime())) return undefined;
+    return d.toISOString().slice(0, 10);
+  }
+
+  private toIso2CountryCode(value?: string): string {
+    if (!value) return 'BD';
+
+    const v = value.trim().toUpperCase();
+
+    if (v.length === 2) return v;
+
+    const countryMap: Record<string, string> = {
+      BANGLADESH: 'BD',
+      'SAUDI ARABIA': 'SA',
+      SAUDI: 'SA',
+      'UNITED ARAB EMIRATES': 'AE',
+      UAE: 'AE',
+      INDIA: 'IN',
+      PAKISTAN: 'PK',
+      'UNITED KINGDOM': 'GB',
+      UK: 'GB',
+      ENGLAND: 'GB',
+      'UNITED STATES': 'US',
+      USA: 'US',
+      AMERICA: 'US',
+      MALAYSIA: 'MY',
+      SINGAPORE: 'SG',
+      QATAR: 'QA',
+      KUWAIT: 'KW',
+      BAHRAIN: 'BH',
+      OMAN: 'OM',
+      JORDAN: 'JO',
+      EGYPT: 'EG',
+      TURKEY: 'TR',
+      INDONESIA: 'ID',
+      PHILIPPINES: 'PH',
+      NEPAL: 'NP',
+      'SRI LANKA': 'LK',
+      MALDIVES: 'MV',
+      MYANMAR: 'MM',
+      THAILAND: 'TH',
+      CHINA: 'CN',
+      JAPAN: 'JP',
+      'SOUTH KOREA': 'KR',
+      KOREA: 'KR',
+      GERMANY: 'DE',
+      FRANCE: 'FR',
+      ITALY: 'IT',
+      SPAIN: 'ES',
+      NETHERLANDS: 'NL',
+      CANADA: 'CA',
+      AUSTRALIA: 'AU',
+      'NEW ZEALAND': 'NZ',
+      'SOUTH AFRICA': 'ZA',
+      NIGERIA: 'NG',
+      KENYA: 'KE',
+      ETHIOPIA: 'ET',
+      AFGHANISTAN: 'AF',
+      IRAN: 'IR',
+      IRAQ: 'IQ',
+      SYRIA: 'SY',
+      LEBANON: 'LB',
+      YEMEN: 'YE',
+      RUSSIA: 'RU',
+      BRAZIL: 'BR',
+      MEXICO: 'MX',
+      ARGENTINA: 'AR',
+    };
+
+    return countryMap[v] || 'BD';
+  }
+
+  private toAmadeusTravelers(passengers: any[]) {
+    return passengers.map((p, index) => {
+      const traveler: any = {
+        id: String(index + 1),
+        travelerType: this.mapTravelerType(p.type),
+        dateOfBirth: this.formatDateOnly(p.dateOfBirth),
+        gender: this.mapGender(p.gender),
+        name: {
+          firstName: (p.firstName || '').toUpperCase(),
+          lastName: (p.lastName || '').toUpperCase(),
+        },
+      };
+
+      if (p.email || p.phone) {
+        traveler.contact = {
+          ...(p.email ? { emailAddress: p.email } : {}),
+          ...(p.phone
+            ? {
+                phones: [
+                  {
+                    deviceType: 'MOBILE',
+                    countryCallingCode: '880',
+                    number: String(p.phone)
+                      .replace(/^\+?880/, '')
+                      .replace(/\D/g, ''),
+                  },
+                ],
+              }
+            : {}),
+        };
+      }
+
+      if (p.passportNumber) {
+        const nationalityCode = this.toIso2CountryCode(p.nationality);
+
+        traveler.documents = [
+          {
+            documentType: 'PASSPORT',
+            number: p.passportNumber,
+            expiryDate: this.formatDateOnly(p.passportExpiry),
+            issuanceCountry: nationalityCode,
+            nationality: nationalityCode,
+            holder: true,
+          },
+        ];
+      }
+
+      return traveler;
+    });
+  }
+
+  private toAmadeusContacts(passengers: any[], contact?: any) {
+    const firstPassenger = passengers?.[0];
+
+    const email = contact?.email || firstPassenger?.email;
+    const phone = contact?.phone || firstPassenger?.phone;
+    const countryCallingCode = contact?.countryCallingCode || '880';
+
+    if (!email && !phone) return undefined;
+
+    return [
+      {
+        addresseeName: {
+          firstName: (firstPassenger?.firstName || 'Passenger').toUpperCase(),
+          lastName: (firstPassenger?.lastName || 'Name').toUpperCase(),
+        },
+        companyName: 'MIJI PORTAL',
+        purpose: 'STANDARD',
+
+        address: {
+          lines: [contact?.addressLine || 'Dhaka, Bangladesh'],
+          postalCode: contact?.postalCode || '1000',
+          cityName: contact?.cityName || 'Dhaka',
+          countryCode: this.toIso2CountryCode(contact?.countryCode || 'BD'),
+        },
+
+        ...(email ? { emailAddress: email } : {}),
+        ...(phone
+          ? {
+              phones: [
+                {
+                  deviceType: 'MOBILE',
+                  countryCallingCode,
+                  number: String(phone)
+                    .replace(/^\+/, '')
+                    .replace(countryCallingCode, '')
+                    .replace(/\D/g, ''),
+                },
+              ],
+            }
+          : {}),
+      },
+    ];
   }
 }

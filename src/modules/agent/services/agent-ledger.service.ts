@@ -4,7 +4,52 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
-import { getAccountSnapshot } from 'src/common/lib/accounting';
+
+export interface LedgerEntry {
+  id: string;
+  date: string;
+  type: string;
+  category: string;
+  description: string;
+  reference: string;
+  invoiceNo: string;
+  pnr: string;
+  debit: number;
+  credit: number;
+  balanceAfter: number;
+  status: string;
+  isCredit: boolean;
+  meta: Record<string, unknown>;
+}
+
+export interface LedgerPagination {
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+  hasNextPage: boolean;
+  hasPrevPage: boolean;
+}
+
+export interface LedgerSummary {
+  currentBalance: number;
+  creditLimit: number;
+  usedLimit: number;
+  availableCredit: number;
+  totalAvailableToBook: number;
+  totalCredit: number;
+  totalDebit: number;
+  totalTransactions: number;
+  depositTotal: number;
+  bookingTotal: number;
+  pendingDepositTotal: number;
+}
+
+export interface LedgerResponse {
+  entries: LedgerEntry[];
+  pagination: LedgerPagination;
+  summary: LedgerSummary;
+}
 
 @Injectable()
 export class AgentLedgerService {
@@ -13,593 +58,370 @@ export class AgentLedgerService {
   constructor(private readonly prisma: PrismaService) {}
 
   // ──────────────────────────────────────────────
-  // GET LEDGER (paginated, filtered, with summary)
+  // GET LEDGER (with filters + pagination)
   // ──────────────────────────────────────────────
   async getLedger(
-    agentId: string,
-    query?: {
-      page?: number;
-      limit?: number;
-      type?: string;
-      sourceType?: string;
-      status?: string;
-      search?: string;
-      startDate?: string;
-      endDate?: string;
-      sortOrder?: 'asc' | 'desc';
-    },
-  ) {
-    const page = Math.max(1, query?.page || 1);
-    const limit = Math.min(100, Math.max(1, query?.limit || 10));
+    userId: string,
+    query: any,
+  ): Promise<LedgerResponse> {
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(query.limit) || 20));
     const skip = (page - 1) * limit;
-    const sortOrder = query?.sortOrder || 'desc';
+    const sortOrder = query.sortOrder === 'asc' ? 'asc' : 'desc';
 
-    // ── Where filter ──
-    const where: any = { userId: agentId };
+    // ── Date filter ──
+    const dateFilter: any = {};
+    if (query.startDate) {
+      dateFilter.gte = new Date(query.startDate);
+    }
+    if (query.endDate) {
+      dateFilter.lte = new Date(
+        new Date(query.endDate).setHours(23, 59, 59, 999),
+      );
+    }
 
-    if (query?.type) where.type = query.type.toUpperCase();
-    if (query?.sourceType) where.sourceType = query.sourceType.toUpperCase();
-    if (query?.status) where.status = query.status.toUpperCase();
+    // ── Type filter (Direct enum match OR category match) ──
+    let typeFilter: any = undefined;
+    if (query.type) {
+      const t = String(query.type).toUpperCase();
 
-    if (query?.startDate || query?.endDate) {
-      where.createdAt = {};
-      if (query.startDate) where.createdAt.gte = new Date(query.startDate);
-      if (query.endDate) {
-        where.createdAt.lte = new Date(`${query.endDate}T23:59:59.999Z`);
+      // Category-based filter mapping
+      const typeMap: Record<string, string[]> = {
+        DEPOSIT_GROUP: [
+          'DEPOSIT',
+          'DEPOSIT_PENDING',
+          'DEPOSIT_FAILED',
+          'DEPOSIT_REFUNDED',
+        ],
+        BOOKING_GROUP: [
+          'TICKET',
+          'TICKET_REQUESTED',
+          'ON_HOLD',
+          'CANCELLED',
+          'VOID',
+          'REFUNDED',
+          'REISSUE',
+        ],
+        MANUAL_GROUP: [
+          'ACM',
+          'ADM',
+          'MANUAL_BOOKING',
+          'DEDUCTION',
+          'DATE_CHANGE',
+          'AMOUNT_ADD',
+          'CREDIT_LIMIT_ADD',
+          'LIMIT_ADJUST',
+          'SERVICE',
+        ],
+        REFUND_GROUP: ['REFUNDED', 'REFUND', 'DEPOSIT_REFUNDED'],
+      };
+
+      if (typeMap[t]) {
+        typeFilter = { in: typeMap[t] };
+      } else {
+        // Direct enum match
+        typeFilter = t;
       }
     }
 
-    if (query?.search) {
-      const searchTerm = query.search.trim();
-      if (searchTerm) {
-        where.OR = [
-          { description: { contains: searchTerm, mode: 'insensitive' } },
-          { reference: { contains: searchTerm, mode: 'insensitive' } },
-          { pnr: { contains: searchTerm, mode: 'insensitive' } },
-          { invoiceNo: { contains: searchTerm, mode: 'insensitive' } },
-          { systemPnr: { contains: searchTerm, mode: 'insensitive' } },
-          { note: { contains: searchTerm, mode: 'insensitive' } },
-        ];
-      }
-    }
+    // ── Where clause ──
+    const where: any = {
+      userId,
+      ...(Object.keys(dateFilter).length && {
+        createdAt: dateFilter,
+      }),
+      ...(typeFilter && { type: typeFilter }),
+      ...(query.status && { status: String(query.status).toUpperCase() }),
+      ...(query.search && {
+        OR: [
+          {
+            description: {
+              contains: query.search,
+              mode: 'insensitive',
+            },
+          },
+          {
+            reference: {
+              contains: query.search,
+              mode: 'insensitive',
+            },
+          },
+          {
+            pnr: {
+              contains: query.search,
+              mode: 'insensitive',
+            },
+          },
+          {
+            invoiceNo: {
+              contains: query.search,
+              mode: 'insensitive',
+            },
+          },
+        ],
+      }),
+    };
 
     // ── Parallel queries ──
     const [
-      entries,
       total,
+      ledgerEntries,
       user,
-      debitAgg,
-      creditAgg,
-      depositAgg,
-      bookingAgg,
-      pendingDepositAgg,
+      allCredits,
+      allDebits,
+      depositTotal,
+      bookingTotal,
+      pendingDeposits,
     ] = await Promise.all([
+      this.prisma.agentLedger.count({ where }),
+
       this.prisma.agentLedger.findMany({
         where,
         orderBy: { createdAt: sortOrder },
         skip,
         take: limit,
       }),
-      this.prisma.agentLedger.count({ where }),
+
       this.prisma.user.findUnique({
-        where: { id: agentId },
+        where: { id: userId },
         select: {
           balance: true,
           creditLimit: true,
           usedLimit: true,
         },
       }),
+
       this.prisma.agentLedger.aggregate({
-        where: { userId: agentId, status: 'COMPLETED' },
-        _sum: { debit: true },
-      }),
-      this.prisma.agentLedger.aggregate({
-        where: { userId: agentId, status: 'COMPLETED' },
+        where: { userId, status: 'COMPLETED' },
         _sum: { credit: true },
       }),
+
+      this.prisma.agentLedger.aggregate({
+        where: { userId, status: 'COMPLETED' },
+        _sum: { debit: true },
+      }),
+
       this.prisma.deposit.aggregate({
-        where: { userId: agentId, status: 'SUCCESS' },
+        where: { userId, status: 'SUCCESS' },
         _sum: { amount: true },
       }),
+
       this.prisma.booking.aggregate({
         where: {
-          agentId,
+          agentId: userId,
           status: { notIn: ['CANCELLED', 'VOIDED', 'REFUNDED'] },
         },
         _sum: { net: true },
       }),
+
       this.prisma.deposit.aggregate({
-        where: { userId: agentId, status: 'PENDING' },
+        where: { userId, status: 'PENDING' },
         _sum: { amount: true },
       }),
     ]);
 
-    if (!user) throw new NotFoundException('User not found');
+    // ── Calculate snapshot ──
+    const balance = Number(user?.balance || 0);
+    const creditLimit = Number(user?.creditLimit || 0);
+    const usedLimit = Number(user?.usedLimit || 0);
+    const walletBalance = Math.max(0, balance);
+    const availableCredit = Math.max(0, creditLimit - usedLimit);
+    const totalAvailableToBook = walletBalance + availableCredit;
 
-    const snapshot = getAccountSnapshot({
-      balance: user.balance,
-      creditLimit: user.creditLimit,
-      usedLimit: user.usedLimit,
-    });
-
-    const formattedEntries = entries.map((entry) =>
+    // ── Build entries ──
+    const entries: LedgerEntry[] = ledgerEntries.map((entry) =>
       this.formatEntry(entry),
     );
 
-    const totalDebit = Number(debitAgg._sum.debit || 0);
-    const totalCredit = Number(creditAgg._sum.credit || 0);
-    const depositTotal = Number(depositAgg._sum.amount || 0);
-    const bookingTotal = Number(bookingAgg._sum.net || 0);
-    const pendingDepositTotal = Number(pendingDepositAgg._sum.amount || 0);
     const totalPages = Math.ceil(total / limit);
 
     return {
-      entries: formattedEntries,
+      entries,
       pagination: {
+        total,
         page,
         limit,
-        total,
         totalPages,
-        hasNext: page < totalPages,
-        hasPrev: page > 1,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1,
       },
       summary: {
-        currentBalance: snapshot.walletBalance,
-        rawBalance: snapshot.rawBalance,
-        creditLimit: snapshot.creditLimit,
-        usedLimit: snapshot.usedLimit,
-        availableCredit: snapshot.availableCredit,
-        totalAvailableToBook: snapshot.totalAvailableToBook,
-        totalCredit,
-        totalDebit,
-        netFlow: totalCredit - totalDebit,
+        currentBalance: walletBalance,
+        creditLimit,
+        usedLimit,
+        availableCredit,
+        totalAvailableToBook,
+        totalCredit: Number(allCredits._sum.credit || 0),
+        totalDebit: Number(allDebits._sum.debit || 0),
         totalTransactions: total,
-        depositTotal,
-        bookingTotal,
-        pendingDepositTotal,
+        depositTotal: Number(depositTotal._sum.amount || 0),
+        bookingTotal: Number(bookingTotal._sum.net || 0),
+        pendingDepositTotal: Number(pendingDeposits._sum.amount || 0),
       },
+    };
+  }
+
+  // ──────────────────────────────────────────────
+  // GET LEDGER SUMMARY (lightweight)
+  // ──────────────────────────────────────────────
+  async getLedgerSummary(userId: string) {
+    const [user, allCredits, allDebits, total, depositTotal, bookingTotal] =
+      await Promise.all([
+        this.prisma.user.findUnique({
+          where: { id: userId },
+          select: {
+            balance: true,
+            creditLimit: true,
+            usedLimit: true,
+          },
+        }),
+        this.prisma.agentLedger.aggregate({
+          where: { userId, status: 'COMPLETED' },
+          _sum: { credit: true },
+        }),
+        this.prisma.agentLedger.aggregate({
+          where: { userId, status: 'COMPLETED' },
+          _sum: { debit: true },
+        }),
+        this.prisma.agentLedger.count({ where: { userId } }),
+        this.prisma.deposit.aggregate({
+          where: { userId, status: 'SUCCESS' },
+          _sum: { amount: true },
+        }),
+        this.prisma.booking.aggregate({
+          where: {
+            agentId: userId,
+            status: { notIn: ['CANCELLED', 'VOIDED', 'REFUNDED'] },
+          },
+          _sum: { net: true },
+        }),
+      ]);
+
+    const balance = Number(user?.balance || 0);
+    const creditLimit = Number(user?.creditLimit || 0);
+    const usedLimit = Number(user?.usedLimit || 0);
+    const walletBalance = Math.max(0, balance);
+    const availableCredit = Math.max(0, creditLimit - usedLimit);
+
+    return {
+      currentBalance: walletBalance,
+      creditLimit,
+      usedLimit,
+      availableCredit,
+      totalAvailableToBook: walletBalance + availableCredit,
+      totalCredit: Number(allCredits._sum.credit || 0),
+      totalDebit: Number(allDebits._sum.debit || 0),
+      totalTransactions: total,
+      depositTotal: Number(depositTotal._sum.amount || 0),
+      bookingTotal: Number(bookingTotal._sum.net || 0),
     };
   }
 
   // ──────────────────────────────────────────────
   // GET SINGLE LEDGER ENTRY
   // ──────────────────────────────────────────────
-  async getLedgerEntry(agentId: string, entryId: string) {
+  async getLedgerEntry(userId: string, entryId: string) {
     const entry = await this.prisma.agentLedger.findFirst({
-      where: { id: entryId, userId: agentId },
+      where: {
+        id: entryId,
+        userId,
+      },
     });
 
-    if (!entry) throw new NotFoundException('Ledger entry not found');
+    if (!entry) {
+      throw new NotFoundException('Ledger entry not found');
+    }
 
     return this.formatEntry(entry);
   }
 
   // ──────────────────────────────────────────────
-  // GET LEDGER SUMMARY ONLY
+  // PRIVATE HELPERS
   // ──────────────────────────────────────────────
-  async getLedgerSummary(agentId: string) {
-    const [user, debitAgg, creditAgg, countAgg] = await Promise.all([
-      this.prisma.user.findUnique({
-        where: { id: agentId },
-        select: {
-          balance: true,
-          creditLimit: true,
-          usedLimit: true,
-        },
-      }),
-      this.prisma.agentLedger.aggregate({
-        where: { userId: agentId, status: 'COMPLETED' },
-        _sum: { debit: true },
-      }),
-      this.prisma.agentLedger.aggregate({
-        where: { userId: agentId, status: 'COMPLETED' },
-        _sum: { credit: true },
-      }),
-      this.prisma.agentLedger.count({
-        where: { userId: agentId },
-      }),
-    ]);
+  private formatEntry(entry: any): LedgerEntry {
+    const isCredit = Number(entry.credit) > 0;
 
-    if (!user) throw new NotFoundException('User not found');
-
-    const snapshot = getAccountSnapshot({
-      balance: user.balance,
-      creditLimit: user.creditLimit,
-      usedLimit: user.usedLimit,
-    });
-
-    return {
-      currentBalance: snapshot.walletBalance,
-      rawBalance: snapshot.rawBalance,
-      creditLimit: snapshot.creditLimit,
-      usedLimit: snapshot.usedLimit,
-      availableCredit: snapshot.availableCredit,
-      totalAvailableToBook: snapshot.totalAvailableToBook,
-      totalCredit: Number(creditAgg._sum.credit || 0),
-      totalDebit: Number(debitAgg._sum.debit || 0),
-      netFlow:
-        Number(creditAgg._sum.credit || 0) -
-        Number(debitAgg._sum.debit || 0),
-      totalTransactions: countAgg,
-    };
-  }
-
-  // ──────────────────────────────────────────────
-  // ✅ CONFIRM BOOKING: ON_HOLD → TICKET
-  // ──────────────────────────────────────────────
-  async confirmBookingLedger(
-    agentId: string,
-    bookingId: string,
-    data: {
-      amount: number;
-      pnr?: string;
-      systemPnr?: string;
-      description?: string;
-      reference?: string;
-      invoiceNo?: string;
-      flightDate?: string;
-      createdBy?: string;
-    },
-  ) {
-    this.logger.log(
-      `[confirmBookingLedger] agentId=${agentId} | bookingId=${bookingId} | pnr=${data.pnr}`,
-    );
-
-    return await this.prisma.$transaction(async (tx) => {
-      // ── Find ALL ON_HOLD entries for this booking ──
-      const holdEntries = await tx.agentLedger.findMany({
-        where: {
-          userId: agentId,
-          bookingId: bookingId,
-          type: 'ON_HOLD',
-        },
-      });
-
-      if (holdEntries.length > 0) {
-        // ── Update ALL ON_HOLD → TICKET ──
-        await tx.agentLedger.updateMany({
-          where: {
-            userId: agentId,
-            bookingId: bookingId,
-            type: 'ON_HOLD',
-          },
-          data: {
-            type: 'TICKET',
-            status: 'COMPLETED',
-            description:
-              data.description ||
-              `Ticket Issued | PNR: ${data.pnr || 'N/A'}`,
-            pnr: data.pnr || undefined,
-            systemPnr: data.systemPnr || undefined,
-            invoiceNo: data.invoiceNo || undefined,
-            reference: data.reference || undefined,
-            
-          },
-        });
-
-        this.logger.log(
-          `✅ Updated ${holdEntries.length} ON_HOLD → TICKET | bookingId=${bookingId}`,
-        );
-      } else {
-        // ── No ON_HOLD found → Create fresh TICKET entry ──
-        this.logger.warn(
-          `⚠️ No ON_HOLD entries for bookingId=${bookingId}. Creating new TICKET entry.`,
-        );
-
-        const user = await tx.user.findUnique({
-          where: { id: agentId },
-          select: {
-            balance: true,
-            creditLimit: true,
-            usedLimit: true,
-          },
-        });
-
-        if (!user) throw new NotFoundException('User not found');
-
-        const walletBalance = Math.max(0, Number(user.balance || 0));
-        const usedLimit = Number(user.usedLimit || 0);
-        const amount = Number(data.amount || 0);
-
-        const fromWallet = Math.min(walletBalance, amount);
-        const fromCredit = Math.max(0, amount - fromWallet);
-        const newBalance = Math.max(0, walletBalance - fromWallet);
-        const newUsedLimit = usedLimit + fromCredit;
-
-        await tx.user.update({
-          where: { id: agentId },
-          data: {
-            balance: newBalance,
-            usedLimit: newUsedLimit,
-          },
-        });
-
-        await tx.agentLedger.create({
-          data: {
-            userId: agentId,
-            bookingId: bookingId,
-            type: 'TICKET',
-            sourceType: 'BOOKING',
-            sourceId: bookingId,
-            debit: amount,
-            credit: 0,
-            balanceAfter: newBalance,
-            currency: 'SAR',
-            status: 'COMPLETED',
-            description:
-              data.description ||
-              `Ticket Issued | PNR: ${data.pnr || 'N/A'}`,
-            pnr: data.pnr || null,
-            systemPnr: data.systemPnr || null,
-            invoiceNo:
-              data.invoiceNo || `INV-${bookingId}-TICKET`,
-            reference: data.reference || bookingId,
-            flightDate: data.flightDate
-              ? new Date(data.flightDate)
-              : null,
-            createdBy: data.createdBy || 'SYSTEM',
-          },
-        });
-
-        this.logger.log(
-          `✅ Created new TICKET entry | bookingId=${bookingId} | amount=${amount}`,
-        );
-      }
-
-      return {
-        success: true,
-        bookingId,
-        type: 'TICKET',
-        updatedCount: holdEntries.length,
-      };
-    });
-  }
-
-  // ──────────────────────────────────────────────
-  // ✅ CANCEL BOOKING: ON_HOLD / TICKET → CANCELLED
-  // ──────────────────────────────────────────────
-  async cancelBookingLedger(
-    agentId: string,
-    bookingId: string,
-    data: {
-      refundAmount?: number;
-      description?: string;
-      createdBy?: string;
-      pnr?: string;
-    },
-  ) {
-    this.logger.log(
-      `[cancelBookingLedger] agentId=${agentId} | bookingId=${bookingId}`,
-    );
-
-    return await this.prisma.$transaction(async (tx) => {
-      // ── Update all active entries to CANCELLED ──
-      const updated = await tx.agentLedger.updateMany({
-        where: {
-          userId: agentId,
-          bookingId: bookingId,
-          type: { in: ['ON_HOLD', 'TICKET'] },
-        },
-        data: {
-          type: 'CANCELLED',
-          status: 'COMPLETED',
-          description: data.description || 'Booking Cancelled',
-        },
-      });
-
-      this.logger.log(
-        `✅ Cancelled ${updated.count} ledger entries | bookingId=${bookingId}`,
-      );
-
-      // ── If refund → create REFUNDED credit entry ──
-      if (data.refundAmount && data.refundAmount > 0) {
-        const user = await tx.user.findUnique({
-          where: { id: agentId },
-          select: { balance: true, usedLimit: true },
-        });
-
-        if (user) {
-          const walletBalance = Math.max(0, Number(user.balance || 0));
-          const usedLimit = Number(user.usedLimit || 0);
-          const refund = Number(data.refundAmount);
-
-          // Repay credit first, then add to balance
-          const creditRepaid = Math.min(refund, usedLimit);
-          const balanceAdded = refund - creditRepaid;
-          const newBalance = walletBalance + balanceAdded;
-          const newUsedLimit = Math.max(0, usedLimit - creditRepaid);
-
-          await tx.user.update({
-            where: { id: agentId },
-            data: {
-              balance: newBalance,
-              usedLimit: newUsedLimit,
-            },
-          });
-
-          await tx.agentLedger.create({
-            data: {
-              userId: agentId,
-              bookingId: bookingId,
-              type: 'REFUNDED',
-              sourceType: 'BOOKING',
-              sourceId: bookingId,
-              credit: refund,
-              debit: 0,
-              balanceAfter: newBalance,
-              currency: 'SAR',
-              status: 'COMPLETED',
-              description:
-                data.description || 'Booking Cancellation Refund',
-              pnr: data.pnr || null,
-              invoiceNo: `INV-${bookingId}-REFUND`,
-              createdBy: data.createdBy || 'SYSTEM',
-            },
-          });
-
-          this.logger.log(
-            `✅ Refund entry created | bookingId=${bookingId} | amount=${refund}`,
-          );
-        }
-      }
-
-      return {
-        success: true,
-        bookingId,
-        type: 'CANCELLED',
-        updatedCount: updated.count,
-      };
-    });
-  }
-
-  // ──────────────────────────────────────────────
-  // ✅ VOID BOOKING: → VOIDED
-  // ──────────────────────────────────────────────
-  async voidBookingLedger(
-    agentId: string,
-    bookingId: string,
-    data: {
-      refundAmount?: number;
-      description?: string;
-      createdBy?: string;
-      pnr?: string;
-    },
-  ) {
-    this.logger.log(
-      `[voidBookingLedger] agentId=${agentId} | bookingId=${bookingId}`,
-    );
-
-    return await this.prisma.$transaction(async (tx) => {
-      await tx.agentLedger.updateMany({
-        where: {
-          userId: agentId,
-          bookingId: bookingId,
-          type: { in: ['ON_HOLD', 'TICKET'] },
-        },
-        data: {
-          type: 'VOID',
-          status: 'COMPLETED',
-          description: data.description || 'Booking Voided',
-        },
-      });
-
-      // Refund if applicable
-      if (data.refundAmount && data.refundAmount > 0) {
-        const user = await tx.user.findUnique({
-          where: { id: agentId },
-          select: { balance: true, usedLimit: true },
-        });
-
-        if (user) {
-          const walletBalance = Math.max(0, Number(user.balance || 0));
-          const usedLimit = Number(user.usedLimit || 0);
-          const refund = Number(data.refundAmount);
-
-          const creditRepaid = Math.min(refund, usedLimit);
-          const balanceAdded = refund - creditRepaid;
-          const newBalance = walletBalance + balanceAdded;
-          const newUsedLimit = Math.max(0, usedLimit - creditRepaid);
-
-          await tx.user.update({
-            where: { id: agentId },
-            data: {
-              balance: newBalance,
-              usedLimit: newUsedLimit,
-            },
-          });
-
-          await tx.agentLedger.create({
-            data: {
-              userId: agentId,
-              bookingId: bookingId,
-              type: 'REFUNDED',
-              sourceType: 'BOOKING',
-              sourceId: bookingId,
-              credit: refund,
-              debit: 0,
-              balanceAfter: newBalance,
-              currency: 'SAR',
-              status: 'COMPLETED',
-              description: data.description || 'Void Refund',
-              pnr: data.pnr || null,
-              invoiceNo: `INV-${bookingId}-VOID`,
-              createdBy: data.createdBy || 'SYSTEM',
-            },
-          });
-        }
-      }
-
-      return { success: true, bookingId, type: 'VOIDED' };
-    });
-  }
-
-  // ──────────────────────────────────────────────
-  // PRIVATE: Format Entry for Frontend
-  // ──────────────────────────────────────────────
-  private formatEntry(entry: any) {
     return {
       id: entry.id,
       date: entry.createdAt.toISOString(),
       type: entry.type,
-      category: this.getTypeLabel(entry.type),
-      sourceType: entry.sourceType,
-      isCredit: Number(entry.credit || 0) > 0,
+      category: this.getCategoryLabel(entry.type),
+      description: entry.description,
+      reference: entry.reference || entry.invoiceNo || entry.id,
+      invoiceNo: entry.invoiceNo || '',
+      pnr: entry.pnr || '',
       debit: Number(entry.debit || 0),
       credit: Number(entry.credit || 0),
       balanceAfter: Number(entry.balanceAfter || 0),
-      description: entry.description,
-      reference:
-        entry.reference ||
-        entry.invoiceNo ||
-        entry.bookingId ||
-        entry.id,
-      invoiceNo: entry.invoiceNo,
-      pnr: entry.pnr,
-      systemPnr: entry.systemPnr,
       status: entry.status,
+      isCredit,
       meta: {
-        pnr: entry.pnr,
-        systemPnr: entry.systemPnr,
         bookingId: entry.bookingId,
         depositId: entry.depositId,
         operationId: entry.operationId,
+        pnr: entry.pnr,
+        systemPnr: entry.systemPnr,
         flightDate: entry.flightDate,
         note: entry.note,
         createdBy: entry.createdBy,
+        sourceType: entry.sourceType,
         sourceId: entry.sourceId,
         currency: entry.currency,
       },
     };
   }
 
-  // ──────────────────────────────────────────────
-  // PRIVATE: Type → Label
-  // ──────────────────────────────────────────────
-  private getTypeLabel(type: string): string {
+  // ✅ Production-Ready Category Labels
+  private getCategoryLabel(type: string): string {
     const labels: Record<string, string> = {
+      // ── Standard ──
       OPENING_BALANCE: 'Opening Balance',
+
+      // ── Ticket Lifecycle ──
       TICKET: 'Ticket Issued',
+      TICKET_REQUESTED: 'Issue Requested', // ✅ NEW - Pending admin approval
       ON_HOLD: 'On Hold',
+
+      // ── Cancel Lifecycle ──
       CANCELLED: 'Cancelled',
+      CANCEL_REQUESTED: 'Cancel Requested', // ✅ Future use
+
+      // ── Void Lifecycle ──
       VOID: 'Void',
       VOIDED: 'Voided',
+      VOID_REQUESTED: 'Void Requested', // ✅ Future use
+
+      // ── Refund Lifecycle ──
       REFUNDED: 'Refunded',
+      REFUND: 'Refund',
+      REFUND_REQUESTED: 'Refund Requested', // ✅ Future use
+
+      // ── Reissue Lifecycle ──
       REISSUE: 'Reissue',
+      REISSUE_REQUESTED: 'Reissue Requested', // ✅ Future use
+
+      // ── Other Charges ──
       SERVICE: 'Service Charge',
+      DEDUCTION: 'Amount Deduction',
+      DATE_CHANGE: 'Date Change',
+
+      // ── Deposit ──
       DEPOSIT: 'Deposit',
       DEPOSIT_PENDING: 'Deposit Pending',
       DEPOSIT_FAILED: 'Deposit Failed',
       DEPOSIT_REFUNDED: 'Deposit Refunded',
-      REFUND: 'Refund',
-      ACM: 'ACM',
-      ADM: 'ADM',
+
+      // ── Airline Memos ──
+      ACM: 'Agency Credit Memo',
+      ADM: 'Agency Debit Memo',
+
+      // ── Manual / Admin ──
       MANUAL_BOOKING: 'Manual Booking',
-      DEDUCTION: 'Deduction',
-      DATE_CHANGE: 'Date Change',
       AMOUNT_ADD: 'Amount Added',
       CREDIT_LIMIT_ADD: 'Credit Limit Added',
-      LIMIT_ADJUST: 'Limit Adjustment',
+      LIMIT_ADJUST: 'Limit Adjusted',
     };
+
     return labels[type] || type;
   }
 }

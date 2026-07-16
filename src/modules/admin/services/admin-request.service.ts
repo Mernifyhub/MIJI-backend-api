@@ -169,7 +169,7 @@ export class AdminRequestService {
       },
     });
 
-    this.logger.log(`✅ Request ${requestId} assigned to ${userId}`);
+    this.logger.log(`Request ${requestId} assigned to ${userId}`);
     return updated;
   }
 
@@ -189,7 +189,9 @@ export class AdminRequestService {
       throw new BadRequestException('Request is not assigned to anyone');
     }
     if (existing.assignedToId !== userId) {
-      throw new ForbiddenException('Only the assigned user can release this request');
+      throw new ForbiddenException(
+        'Only the assigned user can release this request',
+      );
     }
 
     const updated = await this.prisma.bookingRequest.update({
@@ -197,12 +199,12 @@ export class AdminRequestService {
       data: { assignedToId: null, assignedAt: null },
     });
 
-    this.logger.log(`✅ Request ${requestId} released by ${userId}`);
+    this.logger.log(`Request ${requestId} released by ${userId}`);
     return updated;
   }
 
   // ──────────────────────────────────────
-  // PROCESS REQUEST
+  // PROCESS REQUEST (Approve / Reject / Processing)
   // ──────────────────────────────────────
   async processRequest(
     requestId: string,
@@ -216,7 +218,14 @@ export class AdminRequestService {
       issueAmount?: number;
     },
   ) {
-    const { action, adminNote, gdsPnr, ticketNumber, supplierName, issueAmount } = body;
+    const {
+      action,
+      adminNote,
+      gdsPnr,
+      ticketNumber,
+      supplierName,
+      issueAmount,
+    } = body;
 
     // ── Validate action ──
     if (!action || !VALID_ACTIONS.includes(action)) {
@@ -242,8 +251,8 @@ export class AdminRequestService {
       throw new NotFoundException(`Request not found: ${requestId}`);
     }
 
-    this.logger.warn(
-      `[processRequest] requestId=${requestId} | type=${request.type} | action=${action} | bookingId=${request.bookingId}`,
+    this.logger.log(
+      `Process request | type=${request.type} | action=${action} | bookingId=${request.bookingId}`,
     );
 
     // ── Already processed ──
@@ -262,10 +271,14 @@ export class AdminRequestService {
         throw new BadRequestException('GDS PNR is required for issue approval');
       }
       if (!ticketNumber?.toString().trim()) {
-        throw new BadRequestException('Ticket Number is required for issue approval');
+        throw new BadRequestException(
+          'Ticket Number is required for issue approval',
+        );
       }
       if (!supplierName?.toString().trim()) {
-        throw new BadRequestException('Supplier Name is required for issue approval');
+        throw new BadRequestException(
+          'Supplier Name is required for issue approval',
+        );
       }
     }
 
@@ -278,8 +291,10 @@ export class AdminRequestService {
     };
 
     if (gdsPnr != null) updateData.gdsPnr = String(gdsPnr).trim();
-    if (ticketNumber != null) updateData.ticketNumber = String(ticketNumber).trim();
-    if (supplierName != null) updateData.supplierName = String(supplierName).trim();
+    if (ticketNumber != null)
+      updateData.ticketNumber = String(ticketNumber).trim();
+    if (supplierName != null)
+      updateData.supplierName = String(supplierName).trim();
     if (issueAmount != null) updateData.issueAmount = Number(issueAmount);
 
     if (action === 'APPROVED' || action === 'REJECTED') {
@@ -323,9 +338,9 @@ export class AdminRequestService {
       });
 
       const adminName = admin
-  ? `${admin.firstName || ''} ${admin.lastName || ''}`.trim() || 
-    (admin.role === 'ADMIN' ? 'Admin' : 'Manager')
-  : 'Admin';
+        ? `${admin.firstName || ''} ${admin.lastName || ''}`.trim() ||
+          (admin.role === 'ADMIN' ? 'Admin' : 'Manager')
+        : 'Admin';
 
       // 4) Other admins for notification
       const otherAdmins = await tx.user.findMany({
@@ -343,7 +358,6 @@ export class AdminRequestService {
       // APPROVED
       // ════════════════════════════════
       if (action === 'APPROVED') {
-
         // Update booking status
         if (newBookingStatus) {
           const bookingData: any = { status: newBookingStatus as any };
@@ -357,7 +371,7 @@ export class AdminRequestService {
         }
 
         // ─────────────────────────────
-        // ISSUE → TICKET
+        // ✅ ISSUE → TICKET (Updated for TICKET_REQUESTED)
         // ─────────────────────────────
         if (request.type === 'ISSUE') {
           const ledgerData: any = {
@@ -373,12 +387,12 @@ export class AdminRequestService {
 
           if (finalPnr) ledgerData.pnr = finalPnr;
 
-          // Primary update
+          // ✅ Primary update — Now includes TICKET_REQUESTED
           let ledgerResult = await tx.agentLedger.updateMany({
             where: {
               userId: booking.agentId,
               bookingId: booking.id,
-              type: { in: ['ON_HOLD', 'TICKET'] },
+              type: { in: ['TICKET_REQUESTED', 'ON_HOLD', 'TICKET'] }, // ✅ ADDED TICKET_REQUESTED
             },
             data: ledgerData,
           });
@@ -388,30 +402,20 @@ export class AdminRequestService {
             ledgerResult = await tx.agentLedger.updateMany({
               where: {
                 bookingId: booking.id,
-                type: { in: ['ON_HOLD', 'TICKET'] },
+                type: { in: ['TICKET_REQUESTED', 'ON_HOLD', 'TICKET'] }, // ✅ ADDED TICKET_REQUESTED
               },
               data: ledgerData,
             });
           }
 
-          this.logger.warn(
-            `[LEDGER][ISSUE] bookingId=${booking.id} | updated=${ledgerResult.count}`,
+          this.logger.log(
+            `Ledger updated for ISSUE | bookingId=${booking.id} | rows=${ledgerResult.count}`,
           );
 
           // Debug if still 0
           if (ledgerResult.count === 0) {
-            const rows = await tx.agentLedger.findMany({
-              where: { bookingId: booking.id },
-              select: {
-                id: true,
-                userId: true,
-                bookingId: true,
-                type: true,
-                sourceType: true,
-              },
-            });
-            this.logger.error(
-              `[LEDGER][ISSUE] No rows updated! Existing: ${JSON.stringify(rows)}`,
+            this.logger.warn(
+              `No ledger rows updated for bookingId=${booking.id}`,
             );
           }
 
@@ -448,14 +452,14 @@ export class AdminRequestService {
         }
 
         // ─────────────────────────────
-        // CANCEL → CANCELLED
+        // ✅ CANCEL → CANCELLED (Updated for TICKET_REQUESTED)
         // ─────────────────────────────
         else if (request.type === 'CANCEL') {
           const ledgerResult = await tx.agentLedger.updateMany({
             where: {
               userId: booking.agentId,
               bookingId: booking.id,
-              type: { in: ['ON_HOLD', 'TICKET'] },
+              type: { in: ['TICKET_REQUESTED', 'ON_HOLD', 'TICKET'] }, // ✅ ADDED TICKET_REQUESTED
             },
             data: {
               type: 'CANCELLED',
@@ -464,8 +468,8 @@ export class AdminRequestService {
             },
           });
 
-          this.logger.warn(
-            `[LEDGER][CANCEL] bookingId=${booking.id} | updated=${ledgerResult.count}`,
+          this.logger.log(
+            `Ledger updated for CANCEL | bookingId=${booking.id} | rows=${ledgerResult.count}`,
           );
 
           // Refund if specified
@@ -544,14 +548,14 @@ export class AdminRequestService {
         }
 
         // ─────────────────────────────
-        // VOID → VOID
+        // ✅ VOID → VOID (Updated for TICKET_REQUESTED)
         // ─────────────────────────────
         else if (request.type === 'VOID') {
           const ledgerResult = await tx.agentLedger.updateMany({
             where: {
               userId: booking.agentId,
               bookingId: booking.id,
-              type: { in: ['ON_HOLD', 'TICKET'] },
+              type: { in: ['TICKET_REQUESTED', 'ON_HOLD', 'TICKET'] }, // ✅ ADDED TICKET_REQUESTED
             },
             data: {
               type: 'VOID',
@@ -560,8 +564,8 @@ export class AdminRequestService {
             },
           });
 
-          this.logger.warn(
-            `[LEDGER][VOID] bookingId=${booking.id} | updated=${ledgerResult.count}`,
+          this.logger.log(
+            `Ledger updated for VOID | bookingId=${booking.id} | rows=${ledgerResult.count}`,
           );
 
           await tx.notification.create({
@@ -670,9 +674,62 @@ export class AdminRequestService {
       }
 
       // ════════════════════════════════
-      // REJECTED
+      // ✅ REJECTED (Updated — Refund balance if TICKET_REQUESTED)
       // ════════════════════════════════
       else if (action === 'REJECTED') {
+        // ✅ If ISSUE rejected → Refund the held balance
+        if (request.type === 'ISSUE') {
+          // Find the TICKET_REQUESTED ledger entry
+          const heldLedger = await tx.agentLedger.findFirst({
+            where: {
+              userId: booking.agentId,
+              bookingId: booking.id,
+              type: 'TICKET_REQUESTED',
+              status: 'PENDING',
+            },
+            orderBy: { createdAt: 'desc' },
+          });
+
+          if (heldLedger) {
+            const refund = Number(heldLedger.debit || 0);
+
+            if (refund > 0) {
+              const agent = await tx.user.findUnique({
+                where: { id: booking.agentId },
+                select: { balance: true, usedLimit: true },
+              });
+
+              if (agent) {
+                const walletBalance = Math.max(0, Number(agent.balance || 0));
+                const usedLimit = Number(agent.usedLimit || 0);
+                const creditRepaid = Math.min(refund, usedLimit);
+                const newBalance = walletBalance + (refund - creditRepaid);
+                const newUsedLimit = Math.max(0, usedLimit - creditRepaid);
+
+                // Restore agent's balance
+                await tx.user.update({
+                  where: { id: booking.agentId },
+                  data: { balance: newBalance, usedLimit: newUsedLimit },
+                });
+
+                // Update the held ledger to CANCELLED status
+                await tx.agentLedger.update({
+                  where: { id: heldLedger.id },
+                  data: {
+                    status: 'CANCELLED',
+                    description: `Issue Request Rejected | Refunded ${refund} ${booking.currency || 'SAR'}`,
+                  },
+                });
+
+                this.logger.log(
+                  `Refunded ${refund} to agent ${booking.agentId} after ISSUE rejection`,
+                );
+              }
+            }
+          }
+        }
+
+        // Agent notification
         await tx.notification.create({
           data: {
             userId: booking.agentId,
@@ -724,11 +781,13 @@ export class AdminRequestService {
     });
 
     const actionLabel =
-      action === 'APPROVED' ? 'approved'
-      : action === 'REJECTED' ? 'rejected'
-      : 'marked as processing';
+      action === 'APPROVED'
+        ? 'approved'
+        : action === 'REJECTED'
+          ? 'rejected'
+          : 'marked as processing';
 
-    this.logger.log(`✅ Request ${requestId} ${actionLabel} by ${adminId}`);
+    this.logger.log(`Request ${requestId} ${actionLabel} by ${adminId}`);
 
     return {
       success: true,

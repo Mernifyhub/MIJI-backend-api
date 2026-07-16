@@ -130,7 +130,20 @@ model Booking {
   route          String
   departureDate  DateTime
   returnDate     DateTime?
-  pnr            String         @unique
+
+  // ─────────────────────────────────────
+  // PNR FIELDS (Multi-GDS Support)
+  // ─────────────────────────────────────
+  pnr            String         @unique               // GDS PNR (Amadeus/Sabre/Travelport)
+  airlinePnr     String?                              // ✅ Airline's own PNR (carrier record locator)
+
+  // ─────────────────────────────────────
+  // SUPPLIER / GDS INFO (Production-Ready)
+  // ─────────────────────────────────────
+  supplier       String?                              // ✅ "AMADEUS" | "SABRE" | "TRAVELPORT" | "DUFFEL" | "MANUAL"
+  supplierOrderId String?                             // ✅ Generic Order ID (any GDS)
+  supplierData   Json?                                // ✅ Raw response (debugging/audit/future use)
+
   carrier        String
   currency       String?        @default("SAR")
   cabinClass     String?
@@ -141,7 +154,6 @@ model Booking {
 
   agentId        String
   agent          User           @relation(fields: [agentId], references: [id], onDelete: Cascade)
- 
 
   passengers     Passenger[]
   segments       FlightSegment[]
@@ -154,26 +166,28 @@ model Booking {
   commission     Decimal @default(0) @db.Decimal(12, 2)
   priceBreakdown Json?
 
-  // ✅ NEW: Discount snapshot fields
-  promoDiscount  Decimal? @default(0) @db.Decimal(12, 2)
-  discountAmount Decimal? @default(0) @db.Decimal(12, 2)
-  discountLabels    String?    // JSON string ["Eid Offer", "Route Discount"]
-  discountRuleIds   String?    // JSON string ["rule_id_1", "rule_id_2"]
+  // ✅ Discount snapshot fields
+  promoDiscount    Decimal? @default(0) @db.Decimal(12, 2)
+  discountAmount   Decimal? @default(0) @db.Decimal(12, 2)
+  discountLabels   String?    // JSON string ["Eid Offer", "Route Discount"]
+  discountRuleIds  String?    // JSON string ["rule_id_1", "rule_id_2"]
 
   remarks        String?
 
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 
-  // ✅ NEW: Discount usage logs relation
+  // ✅ Discount usage logs relation
   discountUsages DiscountUsageLog[]
 
   @@index([agentId])
   @@index([status])
   @@index([bookingDate])
   @@index([pnr])
+  @@index([airlinePnr])      // ✅ NEW index
+  @@index([supplier])         // ✅ NEW index
+  @@index([supplierOrderId])  // ✅ NEW index
 }
-
 /////////////////////////
 // BOOKING REQUEST
 /////////////////////////
@@ -794,6 +808,7 @@ enum PaymentStatus {
 
 enum LedgerType {
   OPENING_BALANCE
+  TICKET_REQUESTED
   TICKET
   ON_HOLD
   CANCELLED

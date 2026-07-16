@@ -55,7 +55,8 @@ export class AdminLedgerService {
     if (query?.startDate || query?.endDate) {
       where.createdAt = {};
       if (query.startDate) where.createdAt.gte = new Date(query.startDate);
-      if (query.endDate) where.createdAt.lte = new Date(`${query.endDate}T23:59:59.999Z`);
+      if (query.endDate)
+        where.createdAt.lte = new Date(`${query.endDate}T23:59:59.999Z`);
     }
 
     if (query?.search?.trim()) {
@@ -70,39 +71,46 @@ export class AdminLedgerService {
     }
 
     // ── Parallel queries ──
-    const [entries, total, debitAgg, creditAgg, depositAgg, bookingAgg, pendingDepositAgg] =
-      await Promise.all([
-        this.prisma.agentLedger.findMany({
-          where,
-          orderBy: { createdAt: sortOrder },
-          skip,
-          take: limit,
-        }),
-        this.prisma.agentLedger.count({ where }),
-        this.prisma.agentLedger.aggregate({
-          where: { userId: agentId, status: 'COMPLETED' },
-          _sum: { debit: true },
-        }),
-        this.prisma.agentLedger.aggregate({
-          where: { userId: agentId, status: 'COMPLETED' },
-          _sum: { credit: true },
-        }),
-        this.prisma.deposit.aggregate({
-          where: { userId: agentId, status: 'SUCCESS' },
-          _sum: { amount: true },
-        }),
-        this.prisma.booking.aggregate({
-          where: {
-            agentId,
-            status: { notIn: ['CANCELLED', 'VOIDED', 'REFUNDED'] },
-          },
-          _sum: { net: true },
-        }),
-        this.prisma.deposit.aggregate({
-          where: { userId: agentId, status: 'PENDING' },
-          _sum: { amount: true },
-        }),
-      ]);
+    const [
+      entries,
+      total,
+      debitAgg,
+      creditAgg,
+      depositAgg,
+      bookingAgg,
+      pendingDepositAgg,
+    ] = await Promise.all([
+      this.prisma.agentLedger.findMany({
+        where,
+        orderBy: { createdAt: sortOrder },
+        skip,
+        take: limit,
+      }),
+      this.prisma.agentLedger.count({ where }),
+      this.prisma.agentLedger.aggregate({
+        where: { userId: agentId, status: 'COMPLETED' },
+        _sum: { debit: true },
+      }),
+      this.prisma.agentLedger.aggregate({
+        where: { userId: agentId, status: 'COMPLETED' },
+        _sum: { credit: true },
+      }),
+      this.prisma.deposit.aggregate({
+        where: { userId: agentId, status: 'SUCCESS' },
+        _sum: { amount: true },
+      }),
+      this.prisma.booking.aggregate({
+        where: {
+          agentId,
+          status: { notIn: ['CANCELLED', 'VOIDED', 'REFUNDED'] },
+        },
+        _sum: { net: true },
+      }),
+      this.prisma.deposit.aggregate({
+        where: { userId: agentId, status: 'PENDING' },
+        _sum: { amount: true },
+      }),
+    ]);
 
     // ── Account snapshot ──
     const snapshot = getAccountSnapshot({
@@ -342,31 +350,57 @@ export class AdminLedgerService {
     };
   }
 
+  // ✅ Ledger Type Labels — Production Ready
   private getTypeLabel(type: string): string {
     const labels: Record<string, string> = {
+      // ── Standard ──
       OPENING_BALANCE: 'Opening Balance',
+
+      // ── Ticket Lifecycle ──
       TICKET: 'Ticket Issued',
+      TICKET_REQUESTED: 'Issue Requested', // ✅ NEW - Pending admin approval
       ON_HOLD: 'On Hold',
+
+      // ── Cancel Lifecycle ──
       CANCELLED: 'Cancelled',
+      CANCEL_REQUESTED: 'Cancel Requested', // ✅ Future use
+
+      // ── Void Lifecycle ──
       VOID: 'Void',
       VOIDED: 'Voided',
+      VOID_REQUESTED: 'Void Requested', // ✅ Future use
+
+      // ── Refund Lifecycle ──
       REFUNDED: 'Refunded',
+      REFUND: 'Refund',
+      REFUND_REQUESTED: 'Refund Requested', // ✅ Future use
+
+      // ── Reissue Lifecycle ──
       REISSUE: 'Reissue',
+      REISSUE_REQUESTED: 'Reissue Requested', // ✅ Future use
+
+      // ── Other Charges ──
       SERVICE: 'Service Charge',
+      DEDUCTION: 'Deduction',
+      DATE_CHANGE: 'Date Change',
+
+      // ── Deposit ──
       DEPOSIT: 'Deposit',
       DEPOSIT_PENDING: 'Deposit Pending',
       DEPOSIT_FAILED: 'Deposit Failed',
       DEPOSIT_REFUNDED: 'Deposit Refunded',
-      REFUND: 'Refund',
-      ACM: 'ACM',
-      ADM: 'ADM',
+
+      // ── Airline Memos ──
+      ACM: 'ACM (Credit Memo)',
+      ADM: 'ADM (Debit Memo)',
+
+      // ── Manual / Admin ──
       MANUAL_BOOKING: 'Manual Booking',
-      DEDUCTION: 'Deduction',
-      DATE_CHANGE: 'Date Change',
       AMOUNT_ADD: 'Amount Added',
       CREDIT_LIMIT_ADD: 'Credit Limit Added',
       LIMIT_ADJUST: 'Limit Adjustment',
     };
+
     return labels[type] || type;
   }
 }

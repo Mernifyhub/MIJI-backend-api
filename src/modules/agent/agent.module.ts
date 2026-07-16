@@ -19,10 +19,14 @@ import { AgentReportController } from './controllers/agent-report.controller';
 import { AgentReportService } from './services/agent-report.service';
 import { AgentNotificationController } from './controllers/agent-notification.controller';
 import { AgentNotificationService } from './services/agent-notification.service';
+import { FlightsModule } from 'src/modules/flights/flights.module'; // ✅ ADD
+import { AmadeusService } from '../flights/services/providers/amadeus.service';
+import { TravelpayoutsService } from '../flights/services/providers/travelpayouts.service';
+import { DuffelService } from '../flights/services/providers/duffel.service';
 
 @Module({
   imports: [
-    PrismaModule,
+    PrismaModule, FlightsModule, // ✅ ADD
     MulterModule.register({ dest: './uploads' }),
   ],
   controllers: [
@@ -43,7 +47,10 @@ import { AgentNotificationService } from './services/agent-notification.service'
     AgentStaffService,
     AgentSalesService,
     AgentReportService,
-    AgentNotificationService
+    AgentNotificationService,
+    AmadeusService,
+    DuffelService,           // ✅ ADD
+    TravelpayoutsService,    // ✅ ADD
   ],
   exports: [
     AgentDashboardService,

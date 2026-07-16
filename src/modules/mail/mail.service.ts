@@ -46,7 +46,7 @@ export class MailService {
                           <h1 style="color:#fff;margin:0;font-size:28px;
                                      letter-spacing:4px;">${appName}</h1>
                           <p style="color:#93c5fd;margin:8px 0 0;
-                                    font-size:13px;">B2B Travel Solutions</p>
+                                    font-size:13px;">Enterprise B2B Portal Platform</p>
                         </td>
                       </tr>
 

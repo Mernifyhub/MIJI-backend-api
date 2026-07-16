@@ -1,15 +1,4 @@
-import {
-  Controller,
-  Post,
-  Body,
-  HttpCode,
-  HttpStatus,
-  Res,
-  Req,
-  UseGuards,
-  UseInterceptors,
-  UploadedFiles,
-  BadRequestException,
+import {Controller,Post,Body,HttpCode,HttpStatus,Res,Req,UseGuards,UseInterceptors,UploadedFiles,BadRequestException,
 } from '@nestjs/common';
 import { FileFieldsInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';

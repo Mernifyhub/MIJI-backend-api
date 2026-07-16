@@ -101,6 +101,25 @@ export interface PriceBreakdown {
   };
 }
 
+// ✅ NEW: Per-passenger fare type
+export interface PassengerFare {
+  travelerId?: string;
+  travelerType: 'ADULT' | 'CHILD' | 'HELD_INFANT' | 'SEATED_INFANT' | string;
+  baseFare: number;       // Per pax base fare
+  taxAmount: number;      // Per pax tax
+  totalFare: number;      // Per pax total (base + tax)
+  count: number;          // How many of this type
+  subtotal: number;       // totalFare × count
+  currency: string;
+}
+
+// ✅ NEW: Pax-wise pricing summary
+export interface PaxWisePricing {
+  adult?: PassengerFare | null;
+  child?: PassengerFare | null;
+  infant?: PassengerFare | null;
+}
+
 export interface NormalizedFlight {
   id: string;
 
@@ -116,7 +135,9 @@ export interface NormalizedFlight {
 
   priceBreakdown: PriceBreakdown;
 
-  passengerFares?: any[];
+  // ✅ Per-passenger pricing details
+  passengerFares?: PassengerFare[];
+  paxWisePricing?: PaxWisePricing;
 
   itineraries: FlightItinerary[];
 
@@ -151,29 +172,28 @@ export interface NormalizedFlight {
     paymentRequirements: any;
     expiresAt: string;
     totalEmissions: number | null;
+    rawOffer?: any;
   };
 
   // ✅ Travelpayouts API specific data
-  // returnFlightNumber, departureAt, returnAt, origin, destination — optional fields
-  // normalizer এ এগুলো use হয়, তাই এখানে define করা হয়েছে
   _travelpayouts?: {
     airline: string;
     flightNumber: string;
-    returnFlightNumber?: string;   
+    returnFlightNumber?: string;
     link: string;
     transfers: number;
     returnTransfers: number;
     durationTo: number;
     durationBack: number;
-    departureAt?: string;          
-    returnAt?: string;             
-    origin?: string;               
-    destination?: string;          
+    departureAt?: string;
+    returnAt?: string;
+    origin?: string;
+    destination?: string;
     expiresAt: string;
+    rawOffer?: any;
   };
 
   // ✅ Amadeus API specific data
-  // full typed করা হয়েছে (আগে any ছিল)
   _amadeus?: {
     lastTicketingDate?: string;
     lastTicketingDateTime?: string;
@@ -182,10 +202,9 @@ export interface NormalizedFlight {
     instantTicketingRequired?: boolean;
     validatingAirlineCodes?: string[];
     carrierCode?: string;
+    rawOffer?: any;
   };
 
-  // ✅ কোন API থেকে flight এসেছে
-  // frontend এ source badge দেখানোর জন্য FlightSearchService এ attach হয়
   provider?: 'duffel' | 'amadeus' | 'travelpayouts';
 }
 

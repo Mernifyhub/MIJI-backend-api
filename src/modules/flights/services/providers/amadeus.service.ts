@@ -1,3 +1,5 @@
+// src/modules/flights/services/providers/amadeus.service.ts
+
 import { Injectable, Logger } from '@nestjs/common';
 import type { FlightSearchParams } from '../../types/flight.types';
 
@@ -5,35 +7,26 @@ import type { FlightSearchParams } from '../../types/flight.types';
 export class AmadeusService {
   private readonly logger = new Logger(AmadeusService.name);
 
-  // ─────────────────────────────────────────────
-  // Token caching: avoid requesting a new token
-  // on every API call (tokens are valid ~30 mins)
-  // ─────────────────────────────────────────────
   private accessToken: string | null = null;
   private tokenExpiry: Date | null = null;
 
   // ═══════════════════════════════════════════════════════════
-  // 🔑 AUTH: Get OAuth2 access token from Amadeus
-  // Endpoint: POST /v1/security/oauth2/token
+  // 🔑 AUTH (OAuth2 Token)
   // ═══════════════════════════════════════════════════════════
   private async getAccessToken(): Promise<string> {
-    // Return cached token if still valid (saves API calls)
     if (this.accessToken && this.tokenExpiry && new Date() < this.tokenExpiry) {
       return this.accessToken;
     }
 
-    // Load credentials from environment variables
     const clientId = process.env.AMADEUS_CLIENT_ID;
     const clientSecret = process.env.AMADEUS_CLIENT_SECRET;
     const baseUrl = process.env.AMADEUS_BASE_URL || 'https://test.api.amadeus.com';
 
-    // Fail fast if credentials are missing
     if (!clientId || !clientSecret) {
-      throw new Error('AMADEUS_CLIENT_ID or AMADEUS_CLIENT_SECRET not configured');
+      throw new Error('Amadeus credentials not configured');
     }
 
-    // Request a new access token using client_credentials grant
-    const res = await fetch(`${baseUrl}/v1/security/oauth2/token`, {
+      const res = await fetch(`${baseUrl}/v1/security/oauth2/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -45,12 +38,11 @@ export class AmadeusService {
 
     const data = await res.json();
 
-    // Throw if authentication fails
     if (!res.ok) {
-      throw new Error(`Amadeus auth failed: ${data.error_description}`);
+      this.logger.error('Amadeus authentication failed');
+      throw new Error('Authentication failed');
     }
 
-    // Cache token & set expiry (subtract 60s as a safety buffer)
     this.accessToken = data.access_token;
     this.tokenExpiry = new Date(Date.now() + (data.expires_in - 60) * 1000);
 
@@ -58,9 +50,7 @@ export class AmadeusService {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 🔍 STEP 1: SEARCH FLIGHTS
-  // Endpoint: GET /v2/shopping/flight-offers
-  // Returns a list of available flight offers
+  // 🔍 SEARCH FLIGHTS
   // ═══════════════════════════════════════════════════════════
   async search(params: FlightSearchParams): Promise<{
     offers: any[];
@@ -69,30 +59,27 @@ export class AmadeusService {
   }> {
     try {
       const token = await this.getAccessToken();
-      const baseUrl = process.env.AMADEUS_BASE_URL || 'https://test.api.amadeus.com';
+      const baseUrl =
+        process.env.AMADEUS_BASE_URL || 'https://test.api.amadeus.com';
 
-      // Build query string with required search parameters
       const searchParams = new URLSearchParams({
-        originLocationCode: params.origin,                  // e.g. "DAC"
-        destinationLocationCode: params.destination,        // e.g. "DXB"
-        departureDate: params.departureDate,                // "YYYY-MM-DD"
-        adults: String(params.adults),                      // at least 1
-        travelClass: this.mapCabinClass(params.cabinClass), // ECONOMY/BUSINESS/etc.
+        originLocationCode: params.origin,
+        destinationLocationCode: params.destination,
+        departureDate: params.departureDate,
+        adults: String(params.adults),
+        travelClass: this.mapCabinClass(params.cabinClass),
         currencyCode: 'USD',
-        max: '50',                                          // limit results
+        max: '50',
       });
 
-      // Optional: add children passengers
       if (params.children > 0) {
         searchParams.set('children', String(params.children));
       }
 
-      // Optional: add infant passengers
       if (params.infants > 0) {
         searchParams.set('infants', String(params.infants));
       }
 
-      // Optional: add return date for round-trip flights
       if (params.tripType === 'ROUND_TRIP' && params.returnDate) {
         searchParams.set('returnDate', params.returnDate);
       }
@@ -101,7 +88,6 @@ export class AmadeusService {
         `Amadeus search: ${params.origin} → ${params.destination} | ${params.departureDate}`,
       );
 
-      // Make the search API call
       const res = await fetch(
         `${baseUrl}/v2/shopping/flight-offers?${searchParams.toString()}`,
         {
@@ -111,105 +97,135 @@ export class AmadeusService {
 
       const raw = await res.json();
 
-      // Handle API errors gracefully
       if (!res.ok) {
-        this.logger.error('Amadeus API error:', raw);
+        // ✅ Only log status code, not full payload
+        this.logger.error(`Amadeus search failed (${res.status})`);
         return { offers: [], ok: false, status: res.status };
       }
 
-      // Extract offers from response
       const offers = raw?.data || [];
       this.logger.log(`Amadeus returned ${offers.length} offers`);
 
       return { offers, ok: true, status: res.status };
-    } catch (error) {
-      // Catch network/unexpected errors
-      this.logger.error('Amadeus search error:', error);
+    } catch (error: any) {
+      this.logger.error('Amadeus search exception');
       return { offers: [], ok: false, status: 500 };
     }
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 💰 STEP 2: CONFIRM PRICE (Mandatory before booking)
-  // Endpoint: POST /v1/shopping/flight-offers/pricing
-  // Why? Prices can change — Amadeus re-validates the offer
-  // and returns the final price + tax breakdown.
+  // 💰 CONFIRM PRICE
   // ═══════════════════════════════════════════════════════════
   async confirmPrice(flightOffer: any): Promise<{
     data: any;
     ok: boolean;
     status: number;
+    error?: { message: string };
   }> {
     try {
       const token = await this.getAccessToken();
-      const baseUrl = process.env.AMADEUS_BASE_URL || 'https://test.api.amadeus.com';
+      const baseUrl =
+        process.env.AMADEUS_BASE_URL || 'https://test.api.amadeus.com';
 
-      this.logger.log('Confirming flight price...');
+      // Validate offer structure
+      if (!flightOffer?.type || flightOffer.type !== 'flight-offer') {
+        return {
+          data: null,
+          ok: false,
+          status: 400,
+          error: { message: 'Invalid flight offer' },
+        };
+      }
 
-      // Send the flight offer back to Amadeus for re-pricing
+      this.logger.log('Confirming Amadeus price...');
+
+      const requestBody = {
+        data: {
+          type: 'flight-offers-pricing',
+          flightOffers: [flightOffer],
+        },
+      };
+
       const res = await fetch(`${baseUrl}/v1/shopping/flight-offers/pricing`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          data: {
-            type: 'flight-offers-pricing',
-            flightOffers: [flightOffer], // pass the offer from search step
-          },
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       const data = await res.json();
 
-      // If price confirmation fails (e.g. offer expired)
       if (!res.ok) {
-        this.logger.error('Price confirmation failed:', data);
-        return { data: null, ok: false, status: res.status };
+        // ✅ Server-only log (status + code only)
+        const errorCode = data?.errors?.[0]?.code || 'unknown';
+        this.logger.error(
+          `Amadeus price confirmation failed (${res.status}) | Code: ${errorCode}`,
+        );
+
+        const errorDetail =
+          data?.errors?.[0]?.detail ||
+          data?.errors?.[0]?.title ||
+          data?.error_description ||
+          'Price confirmation failed';
+
+        // ✅ Client-safe error mapping
+        const userMessage = this.getUserFriendlyError(errorDetail, errorCode);
+
+        return {
+          data: null,
+          ok: false,
+          status: res.status,
+          error: { message: userMessage },
+        };
       }
 
-      this.logger.log('✅ Price confirmed successfully');
+      this.logger.log('Amadeus price confirmed');
 
-      // Returned data contains updated flightOffers (with final price)
       return { data: data.data, ok: true, status: res.status };
-    } catch (error) {
-      this.logger.error('confirmPrice error:', error);
-      return { data: null, ok: false, status: 500 };
+    } catch (error: any) {
+      this.logger.error('Amadeus confirmPrice exception');
+      return {
+        data: null,
+        ok: false,
+        status: 500,
+        error: { message: 'Service temporarily unavailable' },
+      };
     }
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 🎟️ STEP 3: CREATE FLIGHT ORDER (Actual Booking!)
-  // Endpoint: POST /v1/booking/flight-orders
-  // This creates the PNR (Passenger Name Record) — the real ticket
+  // 🎟️ CREATE ORDER (Booking)
   // ═══════════════════════════════════════════════════════════
   async createOrder(
-    flightOffer: any,        // Confirmed flight offer from Step 2
-    travelers: any[],        // Passenger details (name, dob, passport, etc.)
-    contacts?: any[],        // Optional: email/phone for booking
+    flightOffer: any,
+    travelers: any[],
+    contacts?: any[],
   ): Promise<{
     order: any;
     ok: boolean;
     status: number;
+    error?: { message: string };
   }> {
     try {
       const token = await this.getAccessToken();
-      const baseUrl = process.env.AMADEUS_BASE_URL || 'https://test.api.amadeus.com';
+      const baseUrl =
+        process.env.AMADEUS_BASE_URL || 'https://test.api.amadeus.com';
 
-      // Build request body in Amadeus format
+      this.logger.log(
+        `Creating Amadeus order | Travelers: ${travelers.length}`,
+      );
+
       const body = {
         data: {
           type: 'flight-order',
-          flightOffers: [flightOffer],  // must be the priced offer
-          travelers: travelers,          // array of passenger objects
-          ...(contacts && { contacts }), // include contacts only if provided
+          flightOffers: [flightOffer],
+          travelers: travelers,
+          ...(contacts && { contacts }),
         },
       };
 
-      this.logger.log('Creating flight order (booking)...');
-
-      // Send booking request to Amadeus
       const res = await fetch(`${baseUrl}/v1/booking/flight-orders`, {
         method: 'POST',
         headers: {
@@ -221,27 +237,46 @@ export class AmadeusService {
 
       const data = await res.json();
 
-      // Handle booking failures (invalid traveler info, expired offer, etc.)
       if (!res.ok) {
-        this.logger.error('Order creation failed:', data);
-        return { order: null, ok: false, status: res.status };
+        // ✅ Server-only log (status + code only)
+        const errorCode = data?.errors?.[0]?.code || 'unknown';
+        this.logger.error(
+          `Amadeus order creation failed (${res.status}) | Code: ${errorCode}`,
+        );
+
+        const errorDetail =
+          data?.errors?.[0]?.detail ||
+          data?.errors?.[0]?.title ||
+          'Booking failed';
+
+        // ✅ Client-safe error mapping
+        const userMessage = this.getUserFriendlyError(errorDetail, errorCode);
+
+        return {
+          order: null,
+          ok: false,
+          status: res.status,
+          error: { message: userMessage },
+        };
       }
 
-      // Extract PNR reference (the airline booking reference)
       const pnr = data.data?.associatedRecords?.[0]?.reference;
-      this.logger.log(`✅ Order created successfully! PNR: ${pnr}`);
+      this.logger.log(`Amadeus order created | PNR: ${pnr}`);
 
-      // Returned data includes: order ID, PNR, ticket info, etc.
       return { order: data.data, ok: true, status: res.status };
-    } catch (error) {
-      this.logger.error('createOrder error:', error);
-      return { order: null, ok: false, status: 500 };
+    } catch (error: any) {
+      this.logger.error('Amadeus createOrder exception');
+      return {
+        order: null,
+        ok: false,
+        status: 500,
+        error: { message: 'Booking service temporarily unavailable' },
+      };
     }
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 📄 GET ORDER DETAILS (Optional — useful for ticket status)
-  // Endpoint: GET /v1/booking/flight-orders/{orderId}
+  // 📄 GET ORDER
   // ═══════════════════════════════════════════════════════════
   async getOrder(orderId: string): Promise<{
     order: any;
@@ -250,29 +285,32 @@ export class AmadeusService {
   }> {
     try {
       const token = await this.getAccessToken();
-      const baseUrl = process.env.AMADEUS_BASE_URL || 'https://test.api.amadeus.com';
+      const baseUrl =
+        process.env.AMADEUS_BASE_URL || 'https://test.api.amadeus.com';
 
-      const res = await fetch(`${baseUrl}/v1/booking/flight-orders/${orderId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch(
+        `${baseUrl}/v1/booking/flight-orders/${orderId}`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
 
       const data = await res.json();
 
       if (!res.ok) {
-        this.logger.error('Get order failed:', data);
+        this.logger.error(`Amadeus get order failed (${res.status})`);
         return { order: null, ok: false, status: res.status };
       }
 
       return { order: data.data, ok: true, status: res.status };
-    } catch (error) {
-      this.logger.error('getOrder error:', error);
+    } catch (error: any) {
+      this.logger.error('Amadeus getOrder exception');
       return { order: null, ok: false, status: 500 };
     }
   }
 
   // ═══════════════════════════════════════════════════════════
-  // ❌ CANCEL ORDER (Optional — for booking cancellation)
-  // Endpoint: DELETE /v1/booking/flight-orders/{orderId}
+  // ❌ CANCEL ORDER
   // ═══════════════════════════════════════════════════════════
   async cancelOrder(orderId: string): Promise<{
     ok: boolean;
@@ -280,29 +318,145 @@ export class AmadeusService {
   }> {
     try {
       const token = await this.getAccessToken();
-      const baseUrl = process.env.AMADEUS_BASE_URL || 'https://test.api.amadeus.com';
+      const baseUrl =
+        process.env.AMADEUS_BASE_URL || 'https://test.api.amadeus.com';
 
-      const res = await fetch(`${baseUrl}/v1/booking/flight-orders/${orderId}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch(
+        `${baseUrl}/v1/booking/flight-orders/${orderId}`,
+        {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
 
       if (!res.ok) {
-        this.logger.error(`Cancel order failed: ${res.status}`);
+        this.logger.error(`Amadeus cancel order failed (${res.status})`);
         return { ok: false, status: res.status };
       }
 
-      this.logger.log(`✅ Order ${orderId} cancelled`);
+      this.logger.log(`Amadeus order cancelled: ${orderId}`);
       return { ok: true, status: res.status };
-    } catch (error) {
-      this.logger.error('cancelOrder error:', error);
+    } catch (error: any) {
+      this.logger.error('Amadeus cancelOrder exception');
       return { ok: false, status: 500 };
     }
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 🛠️ HELPER: Convert app-level cabin class → Amadeus format
+  // HELPERS (Server-only, never exposed to client)
   // ═══════════════════════════════════════════════════════════
+
+  /**
+   * User-friendly error message mapping
+   * Hides internal error details from end users
+   */
+  private getUserFriendlyError(
+    originalMessage: string,
+    errorCode?: string | number,
+  ): string {
+    const code = String(errorCode || '').toLowerCase();
+    const msg = (originalMessage || '').toLowerCase();
+
+    // Authentication / token errors
+    if (msg.includes('token') || msg.includes('unauthorized')) {
+      return 'Authentication error. Please try again';
+    }
+
+    // Offer expired / no longer available
+    if (
+      msg.includes('no longer available') ||
+      msg.includes('expired') ||
+      msg.includes('not bookable') ||
+      code === '38047' ||
+      code === '38192'
+    ) {
+      return 'This flight is no longer available. Please search again';
+    }
+
+    // Price changed
+    if (msg.includes('price') && msg.includes('change')) {
+      return 'The price has changed. Please refresh and try again';
+    }
+
+    // Segment / sell issues
+    if (
+      msg.includes('sell segment') ||
+      msg.includes('segment') ||
+      msg.includes('class') ||
+      code === '34651'
+    ) {
+      return 'This flight is no longer available. Please search again';
+    }
+
+    // Invalid passenger data
+    if (msg.includes('traveler') || msg.includes('passenger')) {
+      return 'Invalid passenger information. Please check details';
+    }
+
+    // Invalid phone
+    if (msg.includes('phone')) {
+      return 'Please provide a valid phone number';
+    }
+
+    // Invalid email
+    if (msg.includes('email')) {
+      return 'Please provide a valid email address';
+    }
+
+    // Invalid country / nationality
+    if (
+      msg.includes('issuance country') ||
+      msg.includes('country') ||
+      msg.includes('nationality')
+    ) {
+      return 'Please provide valid nationality/country information';
+    }
+
+    // Address required
+    if (msg.includes('address')) {
+      return 'Please provide a valid address';
+    }
+
+    // Document / passport issues
+    if (
+      msg.includes('document') ||
+      msg.includes('passport') ||
+      msg.includes('issuance')
+    ) {
+      return 'Please provide valid passport information';
+    }
+
+    // Date of birth issues
+    if (msg.includes('date of birth') || msg.includes('born')) {
+      return 'Passenger date of birth is invalid';
+    }
+
+    // Currency issues
+    if (msg.includes('currency')) {
+      return 'Currency error. Please try again';
+    }
+
+    // Rate limit
+    if (msg.includes('rate limit') || code === '429') {
+      return 'Too many requests. Please try again in a moment';
+    }
+
+    // Server / internal errors
+    if (
+      msg.includes('internal') ||
+      msg.includes('server error') ||
+      code === '500'
+    ) {
+      return 'Service temporarily unavailable. Please try again';
+    }
+
+    // Generic fallback
+    return 'Booking failed. Please try again or contact support';
+  }
+
+  /**
+   * Convert app-level cabin class → Amadeus format
+   */
   private mapCabinClass(cabinClass: string): string {
     const map: Record<string, string> = {
       economy: 'ECONOMY',
@@ -310,7 +464,6 @@ export class AmadeusService {
       business: 'BUSINESS',
       first: 'FIRST',
     };
-    // Fallback to ECONOMY if unknown value passed
     return map[cabinClass.toLowerCase()] || 'ECONOMY';
   }
 }
